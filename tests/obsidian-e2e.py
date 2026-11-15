@@ -31,7 +31,7 @@ VAULT_NAME = VAULT_PATH.name
 
 
 def evaluate(code):
-    result = subprocess.check_output(['obsidian', 'eval', 'vault=' + VAULT_NAME, 'code=' + code], text=True)
+    result = subprocess.check_output(['obsidian', 'vault=' + VAULT_NAME, 'eval', 'code=' + code], text=True)
     if 'Error:' in result or '=> ' not in result:
         raise RuntimeError(result)
     value = result.split('=> ', 1)[1].strip()
@@ -77,7 +77,7 @@ def pdf_bytes():
 
 helpers = """
 const assert = (condition,message) => {if(!condition)throw Error(message);};
-const wait = async (predicate,message) => {for(let i=0;i<160;i++){if(predicate())return;await new Promise(r=>setTimeout(r,25));}throw Error(message);};
+const wait = async (predicate,message) => {for(let i=0;i<400;i++){if(predicate())return;await new Promise(r=>setTimeout(r,25));}throw Error(message);};
 const plugin = () => app.plugins.plugins[__PLUGIN_ID__];
 const select = (root,text,occurrence=0) => {
   const doc=root.ownerDocument, walker=doc.createTreeWalker(root,4), nodes=[];let node;
@@ -110,7 +110,7 @@ try:
       window.__axlAudit.files.push(other);
       const pdf=await app.vault.createBinary({json.dumps(PREFIX+'.pdf')},new Uint8Array({json.dumps(list(pdf_bytes()))}).buffer);
       window.__axlAudit.files.push(pdf);
-      const leaf=app.workspace.getLeaf('tab');await leaf.openFile(file);
+      const leaf=app.workspace.getLeaf('tab');await leaf.openFile(file);await app.workspace.revealLeaf(leaf);
       window.__axlAudit.leaf=leaf;
       await leaf.setViewState({{type:'markdown',state:{{file:file.path,mode:'preview'}}}});
       await wait(()=>leaf.view.previewMode?.containerEl.querySelector('table'),'阅读表格未渲染');
@@ -220,7 +220,7 @@ try:
       leaf.detach();s.extraLeaves=[];await app.workspace.revealLeaf(s.leaf);
       return JSON.stringify({{markdown:true,secondOccurrence:true,pdf:true,closedCleanly:true}});
     }})()""")
-    subprocess.check_output(['obsidian', 'plugin:reload', 'vault='+VAULT_NAME, 'id='+PLUGIN], text=True)
+    evaluate(f"(async()=>{{const id={json.dumps(PLUGIN)};await app.plugins.disablePluginAndSave(id);await app.plugins.enablePluginAndSave(id);return JSON.stringify(true)}})()")
     result['reload'] = evaluate(f"""(async()=>{{{helpers}
       const s=window.__axlAudit;await s.leaf.openFile(s.files[0]);await s.leaf.setViewState({{type:'markdown',state:{{file:s.files[0].path,mode:'preview'}}}});
       const data=await plugin().store.getDocument(s.files[0]);assert(s.ids.every(id=>data.highlights.some(m=>m.id===id)),'重载后记录丢失');

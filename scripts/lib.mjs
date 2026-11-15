@@ -59,8 +59,8 @@ export async function artifacts(directory = ROOT) {
 }
 export function evalVault(vault, code) {
   const result = run("obsidian", [
-    "eval",
     "vault=" + vault.name,
+    "eval",
     "code=" + code,
   ]);
   const at = result.indexOf("=> ");
