@@ -3,7 +3,7 @@
   "name": "Axl Light",
   "version": "0.3.1",
   "minAppVersion": "1.0.0",
-  "description": "Non-invasive reading annotations for Markdown and PDF. Highlights and sticky notes are stored in sidecar files, never modifying your original documents.",
+  "description": "为 Markdown 和 PDF 添加高亮与便签；注释单独保存，不修改原文件。",
   "author": "Epiphany Xiao",
   "authorUrl": "https://github.com/little-pond/axl-light",
   "isDesktopOnly": false

@@ -15,10 +15,21 @@ export const ANNOTATION_COLORS = [
 ] as const;
 
 export type AnnotationColor = (typeof ANNOTATION_COLORS)[number];
+export const COLOR_LABELS: Record<AnnotationColor, string> = {
+  yellow: "黄色",
+  green: "绿色",
+  blue: "蓝色",
+  pink: "粉色",
+  orange: "橙色",
+  purple: "紫色",
+};
+
 export type SidebarSide = "left" | "right";
 export type AnnotationSortMode = "newest" | "oldest" | "document";
 
 export interface TextAnchor {
+  /** 原始源码片段，与可见引用文字分开保存；兼容旧数据。 */
+  sourceText?: string;
   startOffset: number;
   endOffset: number;
   selectedText: string;
@@ -146,6 +157,7 @@ export interface AnnotationPluginSettings {
 }
 
 export interface SelectionSnapshot {
+  source?: string;
   filePath: string;
   startOffset: number;
   endOffset: number;
@@ -163,7 +175,7 @@ export const DEFAULT_SETTINGS: AnnotationPluginSettings = {
   stickySide: "right",
   stickyCollapseWidth: 800,
   showLeaderLines: true,
-  defaultAuthor: "Reader",
+  defaultAuthor: "阅读者",
   backupFrequencyMinutes: 30,
   migrateOnRename: true,
   stickyNotesVisible: true,

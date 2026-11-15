@@ -82,6 +82,8 @@
 .axl-icon-button {
   width: 28px;
   height: 28px;
+  padding: 0;
+  flex-shrink: 0;
   border: none;
   background: transparent;
   border-radius: var(--axl-radius-sm);
@@ -91,6 +93,13 @@
   align-items: center;
   justify-content: center;
   transition: background 0.15s, color 0.15s;
+}
+
+.axl-icon-btn > svg,
+.axl-icon-button > svg {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
 }
 
 .axl-icon-btn:hover,

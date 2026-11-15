@@ -7,7 +7,7 @@
 
 import { App, Component, MarkdownRenderer, setIcon } from "obsidian";
 
-import { CommentAnnotation } from "../storage/types";
+import { CommentAnnotation, COLOR_LABELS } from "../storage/types";
 
 interface StickyNoteCardOptions {
   app: App;
@@ -33,7 +33,7 @@ export function renderStickyNoteCard(container: HTMLElement, options: StickyNote
   const header = card.createDiv({ cls: "axl-card-head" });
   header.createSpan({
     cls: `axl-card-color-label axl-label--${options.comment.color}`,
-    text: options.comment.color,
+    text: COLOR_LABELS[options.comment.color],
   });
   header.createSpan({ cls: "axl-card-page", text: "md" });
   header.createSpan({ cls: "axl-card-time", text: formatTime(options.comment.updatedAt) });
@@ -42,20 +42,20 @@ export function renderStickyNoteCard(container: HTMLElement, options: StickyNote
 
   const edit = tools.createEl("button", {
     cls: "axl-icon-btn",
-    attr: { type: "button", title: "Edit note" },
+    attr: { type: "button", title: "编辑便签" },
   });
   setIcon(edit, "pencil");
 
   const collapse = tools.createEl("button", {
     cls: "axl-icon-btn",
-    attr: { type: "button", title: options.comment.collapsed ? "Expand" : "Collapse" },
+    attr: { type: "button", title: options.comment.collapsed ? "展开" : "收起" },
   });
   setIcon(collapse, options.comment.collapsed ? "chevron-down" : "chevron-up");
   collapse.addEventListener("click", () => options.onToggle(options.comment));
 
   const remove = tools.createEl("button", {
     cls: "axl-icon-btn",
-    attr: { type: "button", title: "Delete note" },
+    attr: { type: "button", title: "删除便签" },
   });
   setIcon(remove, "trash-2");
   remove.addEventListener("click", () => options.onDelete(options.comment));
@@ -72,7 +72,7 @@ export function renderStickyNoteCard(container: HTMLElement, options: StickyNote
   renderDisplayMode(content, options);
   edit.addEventListener("click", () => renderEditMode(content, options));
   const foot = card.createDiv({ cls: "axl-card-foot" });
-  foot.createEl("button", { cls: "axl-card-more", text: "···", attr: { type: "button", title: "More" } });
+  foot.createEl("button", { cls: "axl-card-more", text: "···", attr: { type: "button", title: "更多" } });
 
   return card;
 }
@@ -86,20 +86,20 @@ function renderEditMode(container: HTMLElement, options: StickyNoteCardOptions):
   container.empty();
   const title = container.createEl("input", {
     cls: "axl-sticky-title-editor",
-    attr: { type: "text", placeholder: "Title" },
+    attr: { type: "text", placeholder: "标题" },
   });
   title.value = options.comment.title ?? "";
   const editor = container.createEl("textarea", {
     cls: "axl-sticky-editor",
-    attr: { rows: "5", placeholder: "Write a Markdown note..." },
+    attr: { rows: "5", placeholder: "输入 Markdown 便签…" },
   });
   editor.value = options.comment.content;
   editor.focus();
   editor.setSelectionRange(editor.value.length, editor.value.length);
 
   const actions = container.createDiv({ cls: "axl-sticky-edit-actions" });
-  const save = actions.createEl("button", { text: "Save", cls: "mod-cta", attr: { type: "button" } });
-  const cancel = actions.createEl("button", { text: "Cancel", attr: { type: "button" } });
+  const save = actions.createEl("button", { text: "保存", cls: "mod-cta", attr: { type: "button" } });
+  const cancel = actions.createEl("button", { text: "取消", attr: { type: "button" } });
 
   const saveContent = (): void => {
     options.onUpdate(options.comment, editor.value, title.value.trim());
