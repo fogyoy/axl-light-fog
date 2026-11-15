@@ -8,7 +8,7 @@
 import { PluginSettingTab, Setting } from "obsidian";
 
 import type OverlayAnnotationsPlugin from "../../main";
-import { ANNOTATION_COLORS, AnnotationColor, SidebarSide } from "../storage/types";
+import { ANNOTATION_COLORS, AnnotationColor, SidebarSide, COLOR_LABELS } from "../storage/types";
 
 export class AnnotationSettingsTab extends PluginSettingTab {
   constructor(private readonly plugin: OverlayAnnotationsPlugin) {
@@ -18,13 +18,13 @@ export class AnnotationSettingsTab extends PluginSettingTab {
   display(): void {
     const { containerEl } = this;
     containerEl.empty();
-    containerEl.createEl("h2", { text: "Axl Light" });
+    containerEl.createEl("h2", { text: "Axl Light Fog" });
 
     new Setting(containerEl)
-      .setName("Default highlight color")
+      .setName("默认高亮颜色")
       .addDropdown((dropdown) => {
         for (const color of ANNOTATION_COLORS) {
-          dropdown.addOption(color, color);
+          dropdown.addOption(color, COLOR_LABELS[color]);
         }
         dropdown.setValue(this.plugin.settings.defaultHighlightColor).onChange(async (value) => {
           this.plugin.settings.defaultHighlightColor = value as AnnotationColor;
@@ -33,7 +33,7 @@ export class AnnotationSettingsTab extends PluginSettingTab {
       });
 
     new Setting(containerEl)
-      .setName("Sticky note width")
+      .setName("便签宽度")
       .addSlider((slider) => {
         slider
           .setLimits(220, 420, 10)
@@ -47,11 +47,11 @@ export class AnnotationSettingsTab extends PluginSettingTab {
       });
 
     new Setting(containerEl)
-      .setName("Sticky note side")
-      .setDesc("Right is the intended reader layout; left is kept as an advanced preference.")
+      .setName("便签位置")
+      .setDesc("默认显示在右侧；也可以选择左侧。")
       .addDropdown((dropdown) => {
-        dropdown.addOption("right", "Right");
-        dropdown.addOption("left", "Left");
+        dropdown.addOption("right", "右侧");
+        dropdown.addOption("left", "左侧");
         dropdown.setValue(this.plugin.settings.stickySide).onChange(async (value) => {
           this.plugin.settings.stickySide = value as SidebarSide;
           await this.plugin.saveSettings();
@@ -60,8 +60,8 @@ export class AnnotationSettingsTab extends PluginSettingTab {
       });
 
     new Setting(containerEl)
-      .setName("Collapse sticky lane below width")
-      .setDesc("When the editor pane is narrower than this, notes open as popovers instead of a permanent lane.")
+      .setName("收起便签栏的宽度阈值")
+      .setDesc("编辑区域宽度小于此值时，便签将以弹窗显示。")
       .addSlider((slider) => {
         slider
           .setLimits(640, 1200, 20)
@@ -75,7 +75,7 @@ export class AnnotationSettingsTab extends PluginSettingTab {
       });
 
     new Setting(containerEl)
-      .setName("Show leader lines")
+      .setName("显示连接线")
       .addToggle((toggle) => {
         toggle.setValue(this.plugin.settings.showLeaderLines).onChange(async (value) => {
           this.plugin.settings.showLeaderLines = value;
@@ -85,17 +85,17 @@ export class AnnotationSettingsTab extends PluginSettingTab {
       });
 
     new Setting(containerEl)
-      .setName("Default author")
+      .setName("默认作者")
       .addText((text) => {
         text.setValue(this.plugin.settings.defaultAuthor).onChange(async (value) => {
-          this.plugin.settings.defaultAuthor = value.trim() || "Reader";
+          this.plugin.settings.defaultAuthor = value.trim() || "阅读者";
           await this.plugin.saveSettings();
         });
       });
 
     new Setting(containerEl)
-      .setName("Data backup frequency")
-      .setDesc("Minutes between future backup hooks. The sidecar files are still saved immediately.")
+      .setName("数据备份频率")
+      .setDesc("预留备份功能的间隔（分钟）；注释数据仍会立即保存。")
       .addSlider((slider) => {
         slider
           .setLimits(5, 240, 5)
@@ -108,7 +108,7 @@ export class AnnotationSettingsTab extends PluginSettingTab {
       });
 
     new Setting(containerEl)
-      .setName("Migrate annotations on rename")
+      .setName("重命名时迁移注释")
       .addToggle((toggle) => {
         toggle.setValue(this.plugin.settings.migrateOnRename).onChange(async (value) => {
           this.plugin.settings.migrateOnRename = value;

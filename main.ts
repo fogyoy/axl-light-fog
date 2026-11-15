@@ -1,19 +1,46 @@
 /**
  * [INPUT]: 依赖 Obsidian Plugin API、CM6 扩展、sidecar AnnotationStore、锚点算法、视图与设置模块
- * [OUTPUT]: 对外提供 OverlayAnnotationsPlugin 主类，注册跨平台选区、重命名迁移、剪贴板、侧栏与 vault 事件
+ * [OUTPUT]: 对外提供 OverlayAnnotationsPlugin 主类，注册选区、迁移、侧栏与 vault 事件，按文档刷新视图并保留阅读位置
  * [POS]: 插件装配根，协调模块但不修改用户 Markdown 原文
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
 
-import { addIcon, Editor, MarkdownPostProcessorContext, MarkdownView, Notice, Plugin, TFile } from "obsidian";
+import {
+  addIcon,
+  MarkdownPostProcessorContext,
+  MarkdownView,
+  Notice,
+  Plugin,
+  TFile,
+} from "obsidian";
 
-import { createTextAnchor, relocateDocumentAnchors } from "./src/anchor/textAnchor";
-import { createHighlightExtension } from "./src/editor/highlightExtension";
-import { installReadingViewHighlights, refreshReadingViewHighlights } from "./src/editor/readingViewHighlight";
+import { EditorView } from "@codemirror/view";
+import { StateEffect, Compartment } from "@codemirror/state";
+import {
+  createTextAnchor,
+  normalizeMarkdownSource,
+  mapTextAnchor,
+  sourceChanges,
+} from "./src/anchor/textAnchor";
+import {
+  createHighlightExtension,
+  refreshHighlightsEffect,
+} from "./src/editor/highlightExtension";
+import { refreshReadingViewHighlights } from "./src/editor/readingViewHighlight";
+import {
+  mapRenderedSource,
+  renderedSelectionOffsets,
+  sourceRangeForLines,
+  type ProjectionHint,
+} from "./src/editor/sourceProjection";
 import { SelectionToolbar } from "./src/editor/selectionToolbar";
 import { PdfAnnotationLayer } from "./src/pdf/pdfAnnotationLayer";
 import { AnnotationSettingsTab } from "./src/settings/settingsTab";
 import { AnnotationStore } from "./src/storage/annotationStore";
+import {
+  attachedMarkdownComments,
+  visibleMarkdownMarks,
+} from "./src/storage/visibleMarks";
 import {
   AnnotationColor,
   AnnotationPluginSettings,
@@ -24,7 +51,10 @@ import {
 } from "./src/storage/types";
 import { AnnotationPopover } from "./src/views/annotationPopover";
 import { CommentModal } from "./src/views/commentModal";
-import { ANNOTATION_SIDEBAR_VIEW, AnnotationSidebarView } from "./src/views/sidebarView";
+import {
+  ANNOTATION_SIDEBAR_VIEW,
+  AnnotationSidebarView,
+} from "./src/views/sidebarView";
 
 const AXL_LIGHT_ICON = `
   <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
@@ -40,79 +70,145 @@ const AXL_LIGHT_ICON = `
 `;
 
 export default class OverlayAnnotationsPlugin extends Plugin {
+  private disposed = false;
   settings: AnnotationPluginSettings = DEFAULT_SETTINGS;
   store!: AnnotationStore;
 
-  private toolbar!: SelectionToolbar;
-  private popover!: AnnotationPopover;
-  private pdfLayer!: PdfAnnotationLayer;
-  private lastSelection: SelectionSnapshot | null = null;
+  private readonly surfaces = new Map<
+    Document,
+    { toolbar: SelectionToolbar; popover: AnnotationPopover }
+  >();
+  private readonly lastSelections = new WeakMap<Document, SelectionSnapshot>();
+  readonly pendingReadingLocations = new Map<string, Set<string>>();
+  private readonly sourceSaves = new Map<string, Promise<void>>();
+  private get toolbar(): SelectionToolbar {
+    return this.surface(this.activeDocument()).toolbar;
+  }
+  private get popover(): AnnotationPopover {
+    return this.surface(this.activeDocument()).popover;
+  }
+  private readonly pdfLayers = new Map<Document, PdfAnnotationLayer>();
+  private readonly commentModals = new Set<CommentModal>();
+  private highlightExtension!: ReturnType<typeof createHighlightExtension>;
+  private readonly nestedEditorCompartments = new Map<
+    EditorView,
+    Compartment
+  >();
+  private readonly renderedViewVersions = new WeakMap<
+    MarkdownView,
+    { filePath: string; version: number; mode: string }
+  >();
   private readonly renameMigrationTimers = new Map<string, number>();
 
   async onload(): Promise<void> {
-    addIcon("axl-light-icon", AXL_LIGHT_ICON);
+    addIcon("axl-light-fog-icon", AXL_LIGHT_ICON);
     await this.loadSettings();
     this.store = new AnnotationStore(this.app);
     await this.store.initialize();
 
-    this.registerView(ANNOTATION_SIDEBAR_VIEW, (leaf) => new AnnotationSidebarView(leaf, this));
-    this.registerEditorExtension([
-      createHighlightExtension({
-        getDocument: (filePath) => this.store.getCachedDocument(filePath),
-        getVersion: () => this.store.version,
-        rememberSelection: (filePath, startOffset, endOffset, selectedText) => {
-          this.lastSelection = { filePath, startOffset, endOffset, selectedText };
-        },
-      }),
-    ]);
-
-    this.toolbar = new SelectionToolbar({
-      onHighlight: (color) => this.createHighlight(color),
-      onComment: () => this.createComment(),
-      onCopy: () => this.copySelection(),
-      onOpenSidebar: () => this.activateSidebar(),
-    });
-    this.popover = new AnnotationPopover({ app: this.app, component: this });
-    this.pdfLayer = new PdfAnnotationLayer({
-      app: this.app,
-      component: this,
-      getSettings: () => this.settings,
-      getDocument: (file) => this.store.getDocument(file),
-      getCachedDocument: (filePath) => this.store.getCachedDocument(filePath),
-      addHighlight: async (file, highlight) => {
-        await this.store.addPdfHighlight(file, highlight);
-        await this.refreshAnnotations();
-      },
-      addComment: async (file, comment) => {
-        await this.store.addPdfComment(file, comment);
-        await this.refreshAnnotations();
-      },
-      updateComment: async (file, comment) => {
-        await this.store.updatePdfComment(file, comment);
-        await this.refreshAnnotations();
-      },
-      deleteAnnotation: async (file, annotationId) => {
-        await this.store.removeAnnotation(file, annotationId);
-        await this.refreshAnnotations();
+    this.registerView(
+      ANNOTATION_SIDEBAR_VIEW,
+      (leaf) => new AnnotationSidebarView(leaf, this),
+    );
+    this.highlightExtension = createHighlightExtension({
+      getDocument: (filePath) => this.store.getCachedDocument(filePath),
+      getSource: (filePath) => this.store.getSource(filePath),
+      getVersion: () => this.store.version,
+      onDocumentChange: (listener) => this.store.onDocumentChange(listener),
+      trackSource: (filePath, before, after, changes) =>
+        this.store.trackSource(filePath, after, before, changes),
+      rememberSelection: (
+        filePath,
+        startOffset,
+        endOffset,
+        selectedText,
+        document,
+        source,
+      ) => {
+        this.lastSelections.set(document, {
+          filePath,
+          startOffset,
+          endOffset,
+          selectedText,
+          source,
+        });
       },
     });
+    this.registerEditorExtension(this.highlightExtension);
 
     this.addSettingTab(new AnnotationSettingsTab(this));
     this.registerRibbonIcon();
     this.registerCommands();
     this.registerEvents();
-    this.pdfLayer.register();
-    this.registerMarkdownPostProcessor((element, context) => this.renderReadingHighlights(element, context));
+    this.registerMarkdownPostProcessor((element, context) =>
+      this.renderReadingHighlights(element, context),
+    );
+    this.app.workspace.onLayoutReady(() => {
+      void this.initializeOpenViews();
+    });
   }
 
   onunload(): void {
+    this.disposed = true;
+    for (const modal of this.commentModals) modal.close();
+    this.commentModals.clear();
     for (const timer of this.renameMigrationTimers.values()) {
       window.clearTimeout(timer);
     }
     this.renameMigrationTimers.clear();
-    this.toolbar?.destroy();
-    this.popover?.destroy();
+    for (const surface of this.surfaces.values()) {
+      surface.toolbar.destroy();
+      surface.popover.destroy();
+    }
+    for (const ownerDocument of this.surfaces.keys()) {
+      for (const mark of Array.from(
+        ownerDocument.querySelectorAll<HTMLElement>(".axl-reading-highlight"),
+      ))
+        unwrapStaleHighlight(mark);
+    }
+    this.surfaces.clear();
+    for (const layer of this.pdfLayers.values()) layer.destroy();
+    this.pdfLayers.clear();
+    for (const [editor, compartment] of this.nestedEditorCompartments) {
+      if (editor.dom.isConnected)
+        editor.dispatch({ effects: compartment.reconfigure([]) });
+    }
+    this.nestedEditorCompartments.clear();
     this.app.workspace.detachLeavesOfType(ANNOTATION_SIDEBAR_VIEW);
+  }
+
+  private pdfLayerFor(ownerDocument: Document): PdfAnnotationLayer {
+    const existing = this.pdfLayers.get(ownerDocument);
+    if (existing) return existing;
+    const layer = new PdfAnnotationLayer(
+      {
+        app: this.app,
+        component: this,
+        getSettings: () => this.settings,
+        getDocument: (file) => this.store.getDocument(file),
+        getCachedDocument: (filePath) => this.store.getCachedDocument(filePath),
+        addHighlight: async (file, highlight) => {
+          await this.store.addPdfHighlight(file, highlight);
+          await this.refreshAnnotations();
+        },
+        addComment: async (file, comment) => {
+          await this.store.addPdfComment(file, comment);
+          await this.refreshAnnotations();
+        },
+        updateComment: async (file, comment) => {
+          await this.store.updatePdfComment(file, comment);
+          await this.refreshAnnotations();
+        },
+        deleteAnnotation: async (file, annotationId) => {
+          await this.store.removeAnnotation(file, annotationId);
+          await this.refreshAnnotations();
+        },
+      },
+      ownerDocument,
+    );
+    this.pdfLayers.set(ownerDocument, layer);
+    layer.register();
+    return layer;
   }
 
   async loadSettings(): Promise<void> {
@@ -126,9 +222,51 @@ export default class OverlayAnnotationsPlugin extends Plugin {
     await this.saveData(this.settings);
   }
 
-  async refreshAnnotations(): Promise<void> {
-    this.app.workspace.updateOptions();
-    for (const leaf of this.app.workspace.getLeavesOfType(ANNOTATION_SIDEBAR_VIEW)) {
+  async refreshAnnotations(skipSidebar = false): Promise<void> {
+    if (this.disposed) return;
+    for (const leaf of this.app.workspace.getLeavesOfType("markdown")) {
+      const view = leaf.view;
+      if (view instanceof MarkdownView && view.file) {
+        const filePath = view.file.path;
+        const version = this.store.getDocumentVersion(filePath);
+        const previous = this.renderedViewVersions.get(view);
+        const mode = view.getMode();
+        this.renderedViewVersions.set(view, { filePath, version, mode });
+        if (view.getMode() === "source") {
+          if (
+            previous?.filePath !== filePath ||
+            previous.version !== version ||
+            previous.mode !== mode
+          )
+            this.refreshSourceWidgets(view);
+          continue;
+        }
+        if (
+          previous?.filePath !== filePath ||
+          previous.version !== version ||
+          previous.mode !== mode
+        ) {
+          this.pendingReadingLocations.delete(filePath);
+          const data = this.store.getCachedDocument(filePath);
+          if (data)
+            this.pendingReadingLocations.set(
+              filePath,
+              refreshReadingViewHighlights(
+                view.previewMode.containerEl,
+                visibleMarkdownMarks(data),
+                {
+                  source: normalizeMarkdownSource(view.getViewData()),
+                  filePath,
+                },
+              ),
+            );
+        }
+      }
+    }
+    if (skipSidebar) return;
+    for (const leaf of this.app.workspace.getLeavesOfType(
+      ANNOTATION_SIDEBAR_VIEW,
+    )) {
       const view = leaf.view;
       if (view instanceof AnnotationSidebarView) {
         await view.render();
@@ -136,8 +274,63 @@ export default class OverlayAnnotationsPlugin extends Plugin {
     }
   }
 
+  private async initializeOpenViews(): Promise<void> {
+    for (const leaf of this.app.workspace.getLeavesOfType("markdown")) {
+      const view = leaf.view;
+      if (!(view instanceof MarkdownView) || !view.file) continue;
+      await this.store.getDocument(view.file);
+      if (view.getMode() === "source")
+        this.store.trackSource(view.file.path, view.getViewData());
+      else {
+        const scroll = view.previewMode.getScroll();
+        view.previewMode.rerender(true);
+        view.previewMode.applyScroll(scroll);
+      }
+    }
+    await this.refreshAnnotations();
+  }
+
+  private refreshSourceWidgets(view: MarkdownView): void {
+    if (!view.file) return;
+    const document = this.store.getCachedDocument(view.file.path);
+    if (!document) return;
+    const source = normalizeMarkdownSource(view.getViewData());
+    for (const root of Array.from(
+      view.containerEl.querySelectorAll<HTMLElement>(".cm-table-widget"),
+    )) {
+      refreshReadingViewHighlights(root, visibleMarkdownMarks(document), {
+        source,
+        filePath: view.file.path,
+        hint: this.renderHint(root),
+      });
+      this.refreshNestedEditors(root);
+    }
+  }
+
+  private refreshNestedEditors(root: HTMLElement): void {
+    for (const editor of this.nestedEditorCompartments.keys())
+      if (!editor.dom.isConnected) this.nestedEditorCompartments.delete(editor);
+    for (const element of Array.from(
+      root.querySelectorAll<HTMLElement>("td .cm-editor,th .cm-editor"),
+    )) {
+      const editor = EditorView.findFromDOM(element);
+      if (!editor || !element.isConnected) continue;
+      if (editor.plugin(this.highlightExtension))
+        editor.dispatch({ effects: refreshHighlightsEffect.of(null) });
+      else {
+        const compartment = new Compartment();
+        this.nestedEditorCompartments.set(editor, compartment);
+        editor.dispatch({
+          effects: StateEffect.appendConfig.of(
+            compartment.of(this.highlightExtension),
+          ),
+        });
+      }
+    }
+  }
+
   private registerRibbonIcon(): void {
-    const icon = this.addRibbonIcon("highlighter", "Open Axl Light", () => {
+    const icon = this.addRibbonIcon("highlighter", "打开 Axl Light Fog", () => {
       void this.activateSidebar();
     });
     icon.addClass("axl-ribbon-icon");
@@ -146,21 +339,21 @@ export default class OverlayAnnotationsPlugin extends Plugin {
   private registerCommands(): void {
     this.addCommand({
       id: "highlight-selection",
-      name: "Highlight selected text",
+      name: "高亮选中文本",
       hotkeys: [{ modifiers: ["Mod", "Shift"], key: "h" }],
       callback: () => this.createHighlight(this.settings.defaultHighlightColor),
     });
 
     this.addCommand({
       id: "add-sticky-note",
-      name: "Add sticky note to selection",
+      name: "为选中文本添加便签",
       hotkeys: [{ modifiers: ["Mod", "Alt"], key: "m" }],
       callback: () => this.createComment(),
     });
 
     this.addCommand({
       id: "toggle-sticky-notes",
-      name: "Toggle annotation popovers",
+      name: "切换注释弹窗",
       hotkeys: [{ modifiers: ["Mod", "Shift"], key: "n" }],
       callback: async () => {
         this.settings.stickyNotesVisible = !this.settings.stickyNotesVisible;
@@ -171,20 +364,43 @@ export default class OverlayAnnotationsPlugin extends Plugin {
 
     this.addCommand({
       id: "open-annotation-sidebar",
-      name: "Open annotation overview",
+      name: "打开注释概览",
       callback: () => this.activateSidebar(),
     });
   }
 
   private registerEvents(): void {
-    this.registerDomEvent(document, "selectionchange", () => this.toolbar.showForSelection());
-    this.registerDomEvent(document, "mousedown", (event) => {
-      if (!(event.target instanceof HTMLElement) || !event.target.closest(".axl-selection-toolbar")) {
-        window.setTimeout(() => this.toolbar.showForSelection(), 0);
-      }
-    });
-    this.registerDomEvent(document, "click", (event) => {
-      void this.handleAnnotationClick(event);
+    this.registerEvent(
+      this.app.workspace.on("layout-change", () => {
+        void this.refreshAnnotations(true);
+      }),
+    );
+    this.registerEvent(
+      this.app.workspace.on("active-leaf-change", () => {
+        void this.refreshAnnotations(true);
+      }),
+    );
+    this.surface(document);
+    this.pdfLayerFor(document);
+    this.registerEvent(
+      this.app.workspace.on("window-open", (_workspaceWindow, window) => {
+        this.surface(window.document);
+        this.pdfLayerFor(window.document);
+      }),
+    );
+    this.registerEvent(
+      this.app.workspace.on("window-close", (_workspaceWindow, window) => {
+        const surface = this.surfaces.get(window.document);
+        surface?.toolbar.destroy();
+        surface?.popover.destroy();
+        this.surfaces.delete(window.document);
+        this.pdfLayers.get(window.document)?.destroy();
+        this.pdfLayers.delete(window.document);
+      }),
+    );
+    this.app.workspace.iterateAllLeaves((leaf) => {
+      this.surface(leaf.view.containerEl.ownerDocument);
+      this.pdfLayerFor(leaf.view.containerEl.ownerDocument);
     });
 
     this.registerEvent(
@@ -193,21 +409,38 @@ export default class OverlayAnnotationsPlugin extends Plugin {
           return;
         }
 
-        const document = await this.store.getDocument(file);
-        const source = await this.app.vault.cachedRead(file);
-        const relocated = relocateDocumentAnchors(source, document);
-        await this.store.saveDocument({
-          ...relocated,
-          fileHash: await this.store.hashFile(file),
-          lastModified: new Date().toISOString(),
+        const previous = this.sourceSaves.get(file.path) ?? Promise.resolve();
+        const next = previous.then(async () => {
+          await this.store.getDocument(file);
+          const source = await this.app.vault.cachedRead(file);
+          this.store.trackSource(file.path, source);
+          const document = this.store.getCachedDocument(file.path);
+          if (
+            !document ||
+            (!document.highlights.length && !document.comments.length)
+          )
+            return;
+          await this.store.touchFileHash(file);
+          await this.refreshAnnotations();
         });
-        await this.refreshAnnotations();
+        this.sourceSaves.set(
+          file.path,
+          next.catch((error) => {
+            console.error("Axl Light Fog source update failed", error);
+            new Notice("标注位置更新未保存，请稍后重试。");
+          }),
+        );
+        await next;
       }),
     );
 
     this.registerEvent(
       this.app.vault.on("rename", async (file, oldPath) => {
-        if (!this.settings.migrateOnRename || !(file instanceof TFile) || !isAnnotatableFile(file)) {
+        if (
+          !this.settings.migrateOnRename ||
+          !(file instanceof TFile) ||
+          !isAnnotatableFile(file)
+        ) {
           return;
         }
 
@@ -236,17 +469,24 @@ export default class OverlayAnnotationsPlugin extends Plugin {
     );
   }
 
-  private async createHighlight(color: AnnotationColor): Promise<void> {
-    if (this.pdfLayer.isPdfActive()) {
-      await this.pdfLayer.createHighlight(color);
+  private async createHighlight(
+    color: AnnotationColor,
+    ownerDocument = this.activeDocument(),
+  ): Promise<void> {
+    if (this.pdfLayerFor(ownerDocument).isPdfActive()) {
+      await this.pdfLayerFor(ownerDocument).createHighlight(color);
       this.toolbar.hide();
       return;
     }
 
-    const snapshot = await this.resolveSelection();
+    const snapshot = await this.resolveSelection(ownerDocument);
 
     if (!snapshot) {
-      new Notice("Select text first.");
+      new Notice(
+        ownerDocument.getSelection()?.toString().trim()
+          ? "无法确认所选文字的位置，请重新选择正文文本。"
+          : "请先选中文本。",
+      );
       return;
     }
 
@@ -255,37 +495,58 @@ export default class OverlayAnnotationsPlugin extends Plugin {
       return;
     }
 
+    const anchor = createAnchorForSnapshot(
+      this.store.getSource(file.path) ??
+        (await this.app.vault.cachedRead(file)),
+      snapshot,
+    );
+    if (!anchor) {
+      new Notice("所选文字已被删除，请重新选择。");
+      return;
+    }
     const highlight: HighlightAnnotation = {
       id: crypto.randomUUID(),
       color,
-      anchor: createAnchorForSnapshot(await this.app.vault.cachedRead(file), snapshot),
+      anchor,
       createdAt: new Date().toISOString(),
     };
 
     await this.store.addHighlight(file, highlight);
-    await this.refreshActiveReadingViewHighlights(file.path);
     await this.refreshAnnotations();
     this.toolbar.hide();
   }
 
-  private async createComment(): Promise<void> {
-    if (this.pdfLayer.isPdfActive()) {
-      const note = await new CommentModal(this.app, "", "").openAndRead();
+  private async createComment(
+    ownerDocument = this.activeDocument(),
+  ): Promise<void> {
+    if (this.pdfLayerFor(ownerDocument).isPdfActive()) {
+      const layer = this.pdfLayerFor(ownerDocument);
+      const snapshot = layer.selectionForCommand();
+      if (!snapshot) {
+        new Notice("请先在 PDF 中选中文本。");
+        return;
+      }
+      const note = await this.readComment();
       if (note !== null) {
-        await this.pdfLayer.createComment(
+        await layer.createComment(
           this.settings.defaultHighlightColor,
           note.content,
           this.settings.defaultAuthor,
           note.title,
+          snapshot,
         );
       }
       this.toolbar.hide();
       return;
     }
 
-    const snapshot = await this.resolveSelection();
+    const snapshot = await this.resolveSelection(ownerDocument);
     if (!snapshot) {
-      new Notice("Select text first.");
+      new Notice(
+        ownerDocument.getSelection()?.toString().trim()
+          ? "无法确认所选文字的位置，请重新选择正文文本。"
+          : "请先选中文本。",
+      );
       return;
     }
 
@@ -294,15 +555,24 @@ export default class OverlayAnnotationsPlugin extends Plugin {
       return;
     }
 
-    const note = await new CommentModal(this.app, "", "").openAndRead();
+    const note = await this.readComment();
     if (note === null) {
       return;
     }
 
     const now = new Date().toISOString();
+    const anchor = createAnchorForSnapshot(
+      this.store.getSource(file.path) ??
+        (await this.app.vault.cachedRead(file)),
+      snapshot,
+    );
+    if (!anchor) {
+      new Notice("所选文字已被删除，请重新选择。");
+      return;
+    }
     const comment: CommentAnnotation = {
       id: crypto.randomUUID(),
-      anchor: createAnchorForSnapshot(await this.app.vault.cachedRead(file), snapshot),
+      anchor,
       title: note.title,
       content: note.content,
       color: this.settings.defaultHighlightColor,
@@ -316,93 +586,180 @@ export default class OverlayAnnotationsPlugin extends Plugin {
     };
 
     await this.store.addComment(file, comment);
-    await this.refreshActiveReadingViewHighlights(file.path);
     await this.refreshAnnotations();
     this.toolbar.hide();
   }
 
-  private async refreshActiveReadingViewHighlights(filePath: string): Promise<void> {
-    const file = this.app.vault.getAbstractFileByPath(filePath);
-    if (!(file instanceof TFile)) {
-      return;
+  private async readComment() {
+    const modal = new CommentModal(this.app, "", "");
+    this.commentModals.add(modal);
+    try {
+      return await modal.openAndRead();
+    } finally {
+      this.commentModals.delete(modal);
     }
+  }
 
-    const document = this.store.getCachedDocument(filePath) ?? (await this.store.getDocument(file));
-    const marks = [...document.highlights, ...document.comments].filter((item) => !item.orphaned);
-    if (!marks.length) {
-      return;
-    }
+  private activeDocument(): Document {
+    return (
+      this.app.workspace.getMostRecentLeaf()?.view.containerEl.ownerDocument ??
+      document
+    );
+  }
 
-    for (const leaf of this.app.workspace.getLeavesOfType("markdown")) {
-      const view = leaf.view;
-      if (!(view instanceof MarkdownView) || view.file?.path !== filePath) {
-        continue;
+  private surface(document: Document): {
+    toolbar: SelectionToolbar;
+    popover: AnnotationPopover;
+  } {
+    const existing = this.surfaces.get(document);
+    if (existing) return existing;
+    const toolbar = new SelectionToolbar({
+      document,
+      onHighlight: (color) => this.createHighlight(color, document),
+      onComment: () => this.createComment(document),
+      onCopy: () => this.copySelection(document),
+      onOpenSidebar: () => this.activateSidebar(),
+    });
+    const popover = new AnnotationPopover({
+      app: this.app,
+      component: this,
+      document,
+    });
+    const surface = { toolbar, popover };
+    this.surfaces.set(document, surface);
+    this.registerDomEvent(document, "pointerdown", (event) => {
+      if (
+        isHtmlElement(event.target) &&
+        !event.target.closest(".axl-selection-toolbar,.modal,.prompt")
+      )
+        this.lastSelections.delete(document);
+    });
+    this.registerDomEvent(document, "selectionchange", () => {
+      toolbar.showForSelection();
+      const selection = document.getSelection();
+      if (!selection || selection.isCollapsed) {
+        if (
+          !document.activeElement?.closest(
+            ".axl-selection-toolbar,.modal,.prompt",
+          )
+        )
+          this.lastSelections.delete(document);
+        return;
       }
+      void this.resolveSelection(document, false);
+    });
+    this.registerDomEvent(
+      document,
+      "click",
+      (event) => {
+        void this.handleAnnotationClick(event, document);
+      },
+      { capture: true },
+    );
+    return surface;
+  }
 
-      const previewRoot = findPreviewRoot(view);
-      if (previewRoot) {
-        refreshReadingViewHighlights(previewRoot, marks);
-        continue;
-      }
-
-      const previewMode = (view as MarkdownView & { previewMode?: { rerender?: (force?: boolean) => Promise<void> } })
-        .previewMode;
-      if (previewMode?.rerender) {
-        await previewMode.rerender(true);
-        const rerenderedRoot = findPreviewRoot(view);
-        if (rerenderedRoot) {
-          refreshReadingViewHighlights(rerenderedRoot, marks);
+  private async resolveSelection(
+    ownerDocument: Document,
+    allowRemembered = true,
+  ): Promise<SelectionSnapshot | null> {
+    const selection = ownerDocument.getSelection();
+    const range = selection?.rangeCount ? selection.getRangeAt(0) : null;
+    const element =
+      range?.commonAncestorContainer.nodeType === 1
+        ? range.commonAncestorContainer
+        : range?.commonAncestorContainer.parentElement;
+    const owner = this.app.workspace
+      .getLeavesOfType("markdown")
+      .map((leaf) => leaf.view)
+      .find(
+        (view) =>
+          view instanceof MarkdownView &&
+          element &&
+          view.containerEl.contains(element),
+      );
+    if (
+      owner instanceof MarkdownView &&
+      owner.file &&
+      range &&
+      selection &&
+      !selection.isCollapsed
+    ) {
+      const filePath = owner.file.path,
+        source = normalizeMarkdownSource(owner.getViewData());
+      const cmRoot = owner.containerEl.querySelector<HTMLElement>(
+        ".markdown-source-view > .cm-editor",
+      );
+      const cm = cmRoot ? EditorView.findFromDOM(cmRoot) : null;
+      if (
+        cm &&
+        element &&
+        cm.contentDOM.contains(element) &&
+        !element.parentElement?.closest("td,th")
+      ) {
+        const selected = cm.state.selection.main;
+        if (!selected.empty) {
+          const snapshot = {
+            filePath,
+            startOffset: selected.from,
+            endOffset: selected.to,
+            selectedText: cm.state.sliceDoc(selected.from, selected.to),
+            source,
+          };
+          this.lastSelections.set(ownerDocument, snapshot);
+          return snapshot;
         }
       }
-    }
-  }
-
-  private async resolveSelection(): Promise<SelectionSnapshot | null> {
-    const editor = this.activeEditor();
-    if (editor?.file && isMarkdownFile(editor.file)) {
-      const selectedText = editor.editor.getSelection();
-      if (selectedText) {
-        const from = editor.editor.posToOffset(editor.editor.getCursor("from"));
-        const to = editor.editor.posToOffset(editor.editor.getCursor("to"));
-        this.lastSelection = { filePath: editor.file.path, startOffset: from, endOffset: to, selectedText };
-        return this.lastSelection;
-      }
-    }
-
-    const file = this.app.workspace.getActiveFile();
-    const selection = window.getSelection();
-    const selectedText = selection?.toString().replace(/\r\n/g, "\n").trim() ?? "";
-
-    if (file && isMarkdownFile(file) && selectedText) {
-      const source = await this.app.vault.cachedRead(file);
-      const located = locateRenderedSelectionInSource(
-        source,
-        selectedText,
-        selection ? renderedOccurrenceBeforeSelection(selection, selectedText) : 0,
-        selection ? isSelectionInsideCallout(selection) : false,
-      );
-
-      if (located) {
-        this.lastSelection = {
-          filePath: file.path,
-          startOffset: located.startOffset,
-          endOffset: located.endOffset,
-          selectedText,
+      const root =
+        (element?.nodeType === 1
+          ? (element as HTMLElement).closest<HTMLElement>(
+              "table,.el-p,.el-h1,.el-h2,.el-h3,.el-h4,.el-h5,.el-h6,.el-ul,.el-ol,.el-blockquote,.el-pre,.markdown-preview-section",
+            )
+          : null) ?? owner.previewMode.containerEl;
+      const mapping = mapRenderedSource(root, source, this.renderHint(root));
+      const offsets = renderedSelectionOffsets(mapping, range);
+      if (offsets) {
+        const snapshot = {
+          filePath,
+          startOffset: offsets.from,
+          endOffset: offsets.to,
+          selectedText: selection.toString(),
+          source,
         };
-        return this.lastSelection;
+        this.lastSelections.set(ownerDocument, snapshot);
+        return snapshot;
       }
+      return null;
     }
-
-    if (this.lastSelection && file?.path === this.lastSelection.filePath) {
-      return this.lastSelection;
-    }
-
-    return null;
+    if (
+      selection &&
+      !selection.isCollapsed &&
+      !element?.parentElement?.closest(".axl-selection-toolbar,.modal,.prompt")
+    )
+      return null;
+    if (!allowRemembered) return null;
+    const remembered = this.lastSelections.get(ownerDocument);
+    const recent = this.app.workspace.getMostRecentLeaf()?.view;
+    return remembered &&
+      recent instanceof MarkdownView &&
+      recent.file?.path === remembered.filePath &&
+      recent.containerEl.ownerDocument === ownerDocument
+      ? remembered
+      : null;
   }
 
-  private activeEditor(): { editor: Editor; file: TFile | null } | null {
-    const view = this.app.workspace.getActiveViewOfType(MarkdownView);
-    return view ? { editor: view.editor, file: view.file } : null;
+  private renderHint(element: HTMLElement): ProjectionHint | undefined {
+    const sourceView = element.closest<HTMLElement>(".markdown-source-view");
+    const cmRoot = sourceView?.querySelector<HTMLElement>(".cm-editor");
+    if (!cmRoot) return undefined;
+    const cm = EditorView.findFromDOM(cmRoot);
+    if (!cm) return undefined;
+    try {
+      const from = cm.posAtDOM(element);
+      return { from, to: from };
+    } catch {
+      return undefined;
+    }
   }
 
   async activateSidebar(): Promise<void> {
@@ -418,113 +775,190 @@ export default class OverlayAnnotationsPlugin extends Plugin {
     this.app.workspace.revealLeaf(leaf);
   }
 
-  private async copySelection(): Promise<void> {
-    const text = window.getSelection()?.toString() || this.activeEditor()?.editor.getSelection() || "";
+  private async copySelection(
+    ownerDocument = this.activeDocument(),
+  ): Promise<void> {
+    const text = ownerDocument.getSelection()?.toString() || "";
     if (text) {
       try {
-        await writeClipboardText(text);
-        new Notice("Copied selection");
+        await writeClipboardText(text, ownerDocument);
+        new Notice("已复制选中文本");
       } catch {
-        new Notice("Copy failed. Use Ctrl+C instead.");
+        new Notice("复制失败，请使用系统复制快捷键。");
       }
     }
   }
 
-  private async handleAnnotationClick(event: MouseEvent): Promise<void> {
+  private async handleAnnotationClick(
+    event: MouseEvent,
+    ownerDocument: Document,
+  ): Promise<void> {
     const target = event.target;
-    if (!(target instanceof HTMLElement)) {
-      this.popover.hide();
+    if (!isHtmlElement(target)) {
+      this.surface(ownerDocument).popover.hide();
       return;
     }
 
-    const mark = target.closest<HTMLElement>(".axl-highlight, .axl-reading-highlight");
+    const mark = target.closest<HTMLElement>(
+      ".axl-highlight, .axl-reading-highlight",
+    );
     if (!mark) {
       if (!target.closest(".axl-annotation-popover")) {
-        this.popover.hide();
+        this.surface(ownerDocument).popover.hide();
       }
       return;
     }
 
     const annotationId = mark.dataset.axlId;
-    const file = this.app.workspace.getActiveFile();
+    const owner = this.app.workspace
+      .getLeavesOfType("markdown")
+      .map((leaf) => leaf.view)
+      .find(
+        (view) =>
+          view instanceof MarkdownView && view.containerEl.contains(mark),
+      );
+    const file = owner instanceof MarkdownView ? owner.file : null;
     if (!annotationId || !(file instanceof TFile)) {
       return;
     }
 
-    const document = this.store.getCachedDocument(file.path) ?? (await this.store.getDocument(file));
-    const primary =
-      document.comments.find((comment) => comment.id === annotationId) ??
-      document.highlights.find((highlight) => highlight.id === annotationId);
-    if (!primary) {
+    const document =
+      this.store.getCachedDocument(file.path) ??
+      (await this.store.getDocument(file));
+    if (mark.dataset.axlFile !== file.path) return;
+    const ids = new Set<string>([annotationId]);
+    if (mark.dataset.axlIds) {
+      try {
+        const parsed: unknown = JSON.parse(mark.dataset.axlIds);
+        if (Array.isArray(parsed))
+          for (const id of parsed) if (typeof id === "string") ids.add(id);
+      } catch {
+        /* 无效 DOM 属性不作为注释来源。 */
+      }
+    }
+    for (
+      let parent = mark.parentElement?.closest<HTMLElement>(".axl-highlight");
+      parent;
+      parent = parent.parentElement?.closest<HTMLElement>(".axl-highlight")
+    ) {
+      if (parent.dataset.axlFile === file.path && parent.dataset.axlId)
+        ids.add(parent.dataset.axlId);
+    }
+    const items = new Map<
+      string,
+      ReturnType<typeof AnnotationPopover.itemFromAnnotation>
+    >();
+    for (const id of ids) {
+      const primary =
+        document.comments.find((comment) => comment.id === id) ??
+        document.highlights.find((highlight) => highlight.id === id);
+      if (!primary || primary.orphaned) continue;
+      const related =
+        "content" in primary
+          ? [primary]
+          : attachedMarkdownComments(primary, document.comments);
+      for (const annotation of related.length ? related : [primary])
+        items.set(
+          annotation.id,
+          AnnotationPopover.itemFromAnnotation(annotation),
+        );
+    }
+    if (!items.size) {
       unwrapStaleHighlight(mark);
       return;
     }
 
-    const sameAnchorComments = document.comments.filter((comment) => {
-      return (
-        comment.id !== primary.id &&
-        !comment.orphaned &&
-        comment.anchor.startOffset === primary.anchor.startOffset &&
-        comment.anchor.endOffset === primary.anchor.endOffset
-      );
-    });
-    const items = [primary, ...sameAnchorComments].map((annotation) => AnnotationPopover.itemFromAnnotation(annotation));
-
     event.preventDefault();
     event.stopPropagation();
-    this.popover.show({
+    this.surface(ownerDocument).popover.show({
       rect: mark.getBoundingClientRect(),
       sourcePath: file.path,
-      items,
+      items: [...items.values()],
     });
   }
 
-  private async renderReadingHighlights(element: HTMLElement, context: MarkdownPostProcessorContext): Promise<void> {
-    if (!context.sourcePath) {
+  private async renderReadingHighlights(
+    element: HTMLElement,
+    context: MarkdownPostProcessorContext,
+  ): Promise<void> {
+    if (
+      !context.sourcePath ||
+      element.closest(".axl-sidebar,.axl-annotation-popover,.axl-sticky-note")
+    )
       return;
-    }
-
-    await sleep(100);
-
     const file = this.app.vault.getAbstractFileByPath(context.sourcePath);
-    if (!(file instanceof TFile)) {
-      return;
-    }
-
+    if (!(file instanceof TFile) || !isMarkdownFile(file)) return;
+    const section = context.getSectionInfo(element);
     const document = await this.store.getDocument(file);
-    const marks = [...document.highlights, ...document.comments].filter((item) => !item.orphaned);
-    installReadingViewHighlights({ root: element, context, marks });
-  }
-}
-
-function locateRenderedSelectionInSource(
-  source: string,
-  selectedText: string,
-  occurrenceIndex = 0,
-  preferRendered = false,
-): { startOffset: number; endOffset: number } | null {
-  const normalizedSource = normalizeLineEndings(source);
-  const normalizedSelectedText = normalizeLineEndings(selectedText);
-  const exact = nthIndexOf(normalizedSource, normalizedSelectedText, occurrenceIndex);
-  if (exact >= 0) {
-    return {
-      startOffset: exact,
-      endOffset: exact + normalizedSelectedText.length,
-    };
-  }
-
-  if (preferRendered) {
-    const rendered = locateSelectionIgnoringQuoteMarkers(normalizedSource, normalizedSelectedText, occurrenceIndex);
-    if (rendered) {
-      return rendered;
+    if (this.disposed) return;
+    const owner = this.app.workspace
+      .getLeavesOfType("markdown")
+      .map((leaf) => leaf.view)
+      .find(
+        (view) =>
+          view instanceof MarkdownView &&
+          view.file?.path === file.path &&
+          view.containerEl.contains(element),
+      );
+    const source = normalizeMarkdownSource(
+      owner instanceof MarkdownView
+        ? owner.getViewData()
+        : (this.store.getSource(file.path) ??
+            (await this.app.vault.cachedRead(file))),
+    );
+    // 实时预览的表格渲染器可能传入局部 Markdown，行号不一定属于全文。
+    const hint =
+      this.renderHint(element) ??
+      (section && normalizeMarkdownSource(section.text) === source
+        ? sourceRangeForLines(source, section.lineStart, section.lineEnd)
+        : undefined);
+    const pending = refreshReadingViewHighlights(
+      element,
+      visibleMarkdownMarks(document),
+      { source, filePath: file.path, hint },
+    );
+    this.refreshNestedEditors(element);
+    const previousStatuses =
+      this.pendingReadingLocations.get(file.path) ?? new Set<string>();
+    const statuses = new Set(previousStatuses);
+    for (const id of pending) statuses.add(id);
+    for (const mark of Array.from(
+      element.querySelectorAll<HTMLElement>(
+        ".axl-reading-highlight[data-axl-id]",
+      ),
+    ))
+      if (mark.dataset.axlId) statuses.delete(mark.dataset.axlId);
+    this.pendingReadingLocations.set(file.path, statuses);
+    if (
+      statuses.size !== previousStatuses.size ||
+      [...statuses].some((id) => !previousStatuses.has(id))
+    ) {
+      for (const leaf of this.app.workspace.getLeavesOfType(
+        ANNOTATION_SIDEBAR_VIEW,
+      )) {
+        if (leaf.view instanceof AnnotationSidebarView)
+          await leaf.view.render();
+      }
     }
   }
-
-  return locateSelectionIgnoringQuoteMarkers(normalizedSource, normalizedSelectedText, occurrenceIndex);
 }
 
 function createAnchorForSnapshot(source: string, snapshot: SelectionSnapshot) {
-  const anchor = createTextAnchor(source, snapshot.startOffset, snapshot.endOffset);
+  source = normalizeMarkdownSource(source);
+  let anchor = createTextAnchor(
+    snapshot.source ?? source,
+    snapshot.startOffset,
+    snapshot.endOffset,
+  );
+  if (snapshot.source !== undefined && snapshot.source !== source) {
+    const mapped = mapTextAnchor(
+      source,
+      anchor,
+      sourceChanges(snapshot.source, source),
+    );
+    if (mapped.orphaned) return null;
+    anchor = mapped.anchor;
+  }
   const selectedText = snapshot.selectedText.replace(/\r\n/g, "\n").trim();
   const sourceText = anchor.selectedText.replace(/\r\n/g, "\n").trim();
   if (!selectedText || selectedText === sourceText) {
@@ -535,29 +969,6 @@ function createAnchorForSnapshot(source: string, snapshot: SelectionSnapshot) {
     ...anchor,
     selectedText,
   };
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => window.setTimeout(resolve, ms));
-}
-
-function findPreviewRoot(view: MarkdownView): HTMLElement | null {
-  const previewMode = (
-    view as MarkdownView & {
-      previewMode?: {
-        containerEl?: HTMLElement;
-      };
-    }
-  ).previewMode;
-
-  return (
-    view.containerEl.querySelector<HTMLElement>(".markdown-preview-view") ??
-    view.containerEl.querySelector<HTMLElement>(".markdown-preview-section") ??
-    view.containerEl.querySelector<HTMLElement>(".mod-preview") ??
-    previewMode?.containerEl?.querySelector<HTMLElement>(".markdown-preview-section") ??
-    previewMode?.containerEl ??
-    null
-  );
 }
 
 function unwrapStaleHighlight(mark: HTMLElement): void {
@@ -574,140 +985,6 @@ function unwrapStaleHighlight(mark: HTMLElement): void {
   parent.normalize();
 }
 
-function locateSelectionIgnoringQuoteMarkers(
-  source: string,
-  selectedText: string,
-  occurrenceIndex = 0,
-): { startOffset: number; endOffset: number } | null {
-  const normalizedSource = normalizeLineEndings(source);
-  const normalizedSelection = normalizeLineEndings(selectedText);
-  const sourceToRendered: number[] = [];
-  let rendered = "";
-  let lineStart = true;
-  let quotePrefix = false;
-  let index = 0;
-
-  while (index < normalizedSource.length) {
-    const char = normalizedSource[index];
-
-    if (lineStart && char === ">") {
-      quotePrefix = true;
-      lineStart = false;
-      index += 1;
-      continue;
-    }
-
-    if (quotePrefix && char === " ") {
-      quotePrefix = false;
-      index += 1;
-      continue;
-    }
-
-    if (!quotePrefix && char === "[" && normalizedSource.slice(index).match(/^\[![\w-]+\]/)) {
-      while (index < normalizedSource.length && normalizedSource[index] !== "\n") {
-        index += 1;
-      }
-      quotePrefix = false;
-      continue;
-    }
-
-    quotePrefix = false;
-    rendered += char;
-    sourceToRendered.push(index);
-    lineStart = char === "\n";
-    index += 1;
-  }
-
-  const renderedStart = nthIndexOf(rendered, normalizedSelection, occurrenceIndex);
-  if (renderedStart < 0) {
-    return null;
-  }
-
-  const renderedEnd = renderedStart + normalizedSelection.length - 1;
-  return {
-    startOffset: sourceToRendered[renderedStart],
-    endOffset: sourceToRendered[renderedEnd] + 1,
-  };
-}
-
-function renderedOccurrenceBeforeSelection(selection: Selection, selectedText: string): number {
-  if (!selection.rangeCount || !selectedText) {
-    return 0;
-  }
-
-  const range = selection.getRangeAt(0);
-  const root = selectionRoot(range);
-  if (!root) {
-    return 0;
-  }
-
-  const before = document.createRange();
-  before.selectNodeContents(root);
-  before.setEnd(range.startContainer, range.startOffset);
-  const beforeText = before.toString().replace(/\r\n/g, "\n");
-  before.detach();
-  return countOccurrences(beforeText, selectedText);
-}
-
-function selectionRoot(range: Range): HTMLElement | null {
-  const container =
-    range.commonAncestorContainer instanceof HTMLElement
-      ? range.commonAncestorContainer
-      : range.commonAncestorContainer.parentElement;
-
-  return (
-    container?.closest<HTMLElement>(".markdown-preview-view") ??
-    container?.closest<HTMLElement>(".markdown-preview-section") ??
-    container?.closest<HTMLElement>(".mod-preview") ??
-    null
-  );
-}
-
-function isSelectionInsideCallout(selection: Selection): boolean {
-  if (!selection.rangeCount) {
-    return false;
-  }
-
-  const range = selection.getRangeAt(0);
-  const container =
-    range.commonAncestorContainer instanceof HTMLElement
-      ? range.commonAncestorContainer
-      : range.commonAncestorContainer.parentElement;
-
-  return Boolean(container?.closest(".callout, .callout-content"));
-}
-
-function countOccurrences(source: string, target: string): number {
-  if (!target) {
-    return 0;
-  }
-
-  let count = 0;
-  let cursor = source.indexOf(target);
-  while (cursor >= 0) {
-    count += 1;
-    cursor = source.indexOf(target, cursor + target.length);
-  }
-  return count;
-}
-
-function nthIndexOf(source: string, target: string, occurrenceIndex: number): number {
-  if (!target) {
-    return -1;
-  }
-
-  let cursor = source.indexOf(target);
-  let seen = 0;
-  while (cursor >= 0) {
-    if (seen >= occurrenceIndex) {
-      return cursor;
-    }
-    seen += 1;
-    cursor = source.indexOf(target, cursor + target.length);
-  }
-  return -1;
-}
-
 function isMarkdownFile(file: TFile): boolean {
   return file.extension.toLowerCase() === "md";
 }
@@ -716,26 +993,36 @@ function isAnnotatableFile(file: TFile): boolean {
   return ["md", "pdf"].includes(file.extension.toLowerCase());
 }
 
-function normalizeLineEndings(content: string): string {
-  return content.replace(/\r\n/g, "\n");
-}
-
-async function writeClipboardText(text: string): Promise<void> {
+async function writeClipboardText(
+  text: string,
+  ownerDocument: Document,
+): Promise<void> {
   try {
-    await navigator.clipboard.writeText(text);
+    await ownerDocument.defaultView?.navigator.clipboard.writeText(text);
     return;
   } catch {
-    const textarea = document.body.createEl("textarea");
+    const textarea = ownerDocument.body.createEl("textarea");
     textarea.value = text;
     textarea.style.position = "fixed";
     textarea.style.left = "-9999px";
     try {
       textarea.select();
-      if (!document.execCommand("copy")) {
+      if (!ownerDocument.execCommand("copy")) {
         throw new Error("execCommand copy failed");
       }
     } finally {
       textarea.remove();
     }
   }
+}
+
+function isHtmlElement(target: EventTarget | null): target is HTMLElement {
+  return (
+    target !== null &&
+    "nodeType" in target &&
+    target.nodeType === 1 &&
+    "closest" in target &&
+    typeof target.closest === "function" &&
+    "style" in target
+  );
 }

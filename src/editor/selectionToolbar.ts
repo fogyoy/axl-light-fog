@@ -5,9 +5,14 @@
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
 
-import { ANNOTATION_COLORS, AnnotationColor } from "../storage/types";
+import {
+  ANNOTATION_COLORS,
+  AnnotationColor,
+  COLOR_LABELS,
+} from "../storage/types";
 
 interface SelectionToolbarOptions {
+  document: Document;
   onHighlight: (color: AnnotationColor) => void;
   onComment: () => void;
   onCopy: () => void;
@@ -18,23 +23,31 @@ export class SelectionToolbar {
   private readonly element: HTMLElement;
   private visible = false;
   private readonly handleMouseUp = (): void => {
-    window.setTimeout(() => this.showForSelection(), 0);
+    this.options.document.defaultView?.setTimeout(
+      () => this.showForSelection(),
+      0,
+    );
   };
 
   constructor(private readonly options: SelectionToolbarOptions) {
-    this.element = document.body.createDiv({ cls: "axl-toolbar axl-selection-toolbar" });
+    this.element = this.options.document.body.createDiv({
+      cls: "axl-toolbar axl-selection-toolbar",
+    });
     this.render();
+    this.element.addEventListener("mousedown", (event) =>
+      event.preventDefault(),
+    );
     this.hide();
-    document.addEventListener("mouseup", this.handleMouseUp);
+    this.options.document.addEventListener("mouseup", this.handleMouseUp);
   }
 
   destroy(): void {
-    document.removeEventListener("mouseup", this.handleMouseUp);
+    this.options.document.removeEventListener("mouseup", this.handleMouseUp);
     this.element.remove();
   }
 
   showForSelection(): void {
-    const selection = window.getSelection();
+    const selection = this.options.document.getSelection();
     if (!selection || selection.rangeCount === 0 || selection.isCollapsed) {
       this.hide();
       return;
@@ -69,7 +82,7 @@ export class SelectionToolbar {
         cls: `axl-toolbar-color axl-toolbar-color--${color}`,
         attr: {
           type: "button",
-          "aria-label": `Highlight ${color}`,
+          "aria-label": `高亮：${COLOR_LABELS[color]}`,
           "data-axl-color": color,
         },
       });
@@ -78,13 +91,13 @@ export class SelectionToolbar {
 
     this.element.createDiv({ cls: "axl-toolbar-sep" });
 
-    const commentButton = this.iconButton("Add sticky note", NOTE_ICON);
+    const commentButton = this.iconButton("添加便签", NOTE_ICON);
     commentButton.addEventListener("click", () => this.options.onComment());
 
-    const copyButton = this.iconButton("Copy", COPY_ICON);
+    const copyButton = this.iconButton("复制", COPY_ICON);
     copyButton.addEventListener("click", () => this.options.onCopy());
 
-    const sidebarButton = this.iconButton("Open overview", OVERVIEW_ICON);
+    const sidebarButton = this.iconButton("打开注释概览", OVERVIEW_ICON);
     sidebarButton.addEventListener("click", () => this.options.onOpenSidebar());
   }
 
@@ -104,8 +117,8 @@ export class SelectionToolbar {
 
 function isSelectionInsideWorkspace(range: Range): boolean {
   const container =
-    range.commonAncestorContainer instanceof HTMLElement
-      ? range.commonAncestorContainer
+    range.commonAncestorContainer.nodeType === 1
+      ? (range.commonAncestorContainer as HTMLElement)
       : range.commonAncestorContainer.parentElement;
 
   if (!container) {

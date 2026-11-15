@@ -7,9 +7,15 @@
 
 import { App, Component, MarkdownRenderer, setIcon } from "obsidian";
 
-import { AnnotationColor, CommentAnnotation, HighlightAnnotation } from "../storage/types";
+import {
+  AnnotationColor,
+  CommentAnnotation,
+  HighlightAnnotation,
+  COLOR_LABELS,
+} from "../storage/types";
 
 interface AnnotationPopoverOptions {
+  document: Document;
   app: App;
   component: Component;
 }
@@ -35,7 +41,9 @@ export class AnnotationPopover {
   private readonly element: HTMLElement;
 
   constructor(private readonly options: AnnotationPopoverOptions) {
-    this.element = document.body.createDiv({ cls: "axl-annotation-popover" });
+    this.element = this.options.document.body.createDiv({
+      cls: "axl-annotation-popover",
+    });
     this.element.addEventListener("click", (event) => event.stopPropagation());
     this.hide();
   }
@@ -49,10 +57,10 @@ export class AnnotationPopover {
     this.element.toggleClass("is-visible", true);
 
     const header = this.element.createDiv({ cls: "axl-popover-header" });
-    header.createSpan({ cls: "axl-popover-title", text: "Annotation" });
+    header.createSpan({ cls: "axl-popover-title", text: "注释" });
     const close = header.createEl("button", {
       cls: "axl-icon-button",
-      attr: { type: "button", title: "Close annotation popover" },
+      attr: { type: "button", title: "关闭注释弹窗" },
     });
     setIcon(close, "x");
     close.addEventListener("click", () => this.hide());
@@ -82,7 +90,11 @@ export class AnnotationPopover {
     };
   }
 
-  private renderItem(container: HTMLElement, item: AnnotationPopoverItem, sourcePath: string): void {
+  private renderItem(
+    container: HTMLElement,
+    item: AnnotationPopoverItem,
+    sourcePath: string,
+  ): void {
     const card = container.createDiv({
       cls: "axl-popover-card",
       attr: {
@@ -92,24 +104,43 @@ export class AnnotationPopover {
     });
 
     const meta = card.createDiv({ cls: "axl-popover-meta" });
-    meta.createSpan({ cls: "axl-color-chip", text: item.color, attr: { "data-axl-color": item.color } });
-    meta.createSpan({ text: item.kind === "comment" ? item.author ?? "Reader" : "highlight only" });
+    meta.createSpan({
+      cls: "axl-color-chip",
+      text: COLOR_LABELS[item.color],
+      attr: { "data-axl-color": item.color },
+    });
+    meta.createSpan({
+      text: item.kind === "comment" ? (item.author ?? "阅读者") : "仅高亮",
+    });
 
     card.createDiv({ cls: "axl-popover-quote", text: item.quote });
     if (!item.content) {
-      card.createDiv({ cls: "axl-popover-empty", text: "No sticky note attached yet." });
+      card.createDiv({ cls: "axl-popover-empty", text: "尚未添加便签。" });
       return;
     }
 
     const body = card.createDiv({ cls: "axl-popover-body" });
-    MarkdownRenderer.render(this.options.app, item.content, body, sourcePath, this.options.component);
+    MarkdownRenderer.render(
+      this.options.app,
+      item.content,
+      body,
+      sourcePath,
+      this.options.component,
+    );
   }
 
   private place(rect: DOMRect): void {
+    const window = this.element.ownerDocument.defaultView;
+    if (!window) return;
     const width = Math.min(320, window.innerWidth - 24);
-    const left = clamp(rect.left + rect.width / 2 - width / 2, 12, window.innerWidth - width - 12);
+    const left = clamp(
+      rect.left + rect.width / 2 - width / 2,
+      12,
+      window.innerWidth - width - 12,
+    );
     const below = rect.bottom + 10;
-    const top = below + 220 > window.innerHeight ? Math.max(12, rect.top - 230) : below;
+    const top =
+      below + 220 > window.innerHeight ? Math.max(12, rect.top - 230) : below;
 
     this.element.style.width = `${width}px`;
     this.element.style.left = `${left}px`;

@@ -13,9 +13,9 @@ interface CommentModalValue {
 }
 
 const NOTE_TITLE_OPTIONS = [
-  { value: "Insight", label: "💡 Insight" },
-  { value: "Question", label: "❓ Question" },
-  { value: "Reminder", label: "🔔 Reminder" },
+  { value: "Insight", label: "💡 洞见" },
+  { value: "Question", label: "❓ 问题" },
+  { value: "Reminder", label: "🔔 提醒" },
 ] as const;
 
 export class CommentModal extends Modal {
@@ -39,13 +39,13 @@ export class CommentModal extends Modal {
 
   onOpen(): void {
     this.contentEl.empty();
-    this.contentEl.createEl("h2", { text: "Sticky note" });
+    this.contentEl.createEl("h2", { text: "便签" });
 
     const title = this.renderTitleInput();
     const input = this.renderContentInput();
     const actions = this.contentEl.createDiv({ cls: "axl-modal-actions" });
-    const cancel = actions.createEl("button", { text: "Cancel", cls: "axl-modal-cancel", attr: { type: "button" } });
-    const save = actions.createEl("button", { text: "Save", cls: "axl-modal-save", attr: { type: "button" } });
+    const cancel = actions.createEl("button", { text: "取消", cls: "axl-modal-cancel", attr: { type: "button" } });
+    const save = actions.createEl("button", { text: "保存", cls: "axl-modal-save", attr: { type: "button" } });
 
     cancel.addEventListener("click", () => {
       this.value = null;
@@ -66,7 +66,7 @@ export class CommentModal extends Modal {
 
   private renderTitleInput(): HTMLSelectElement {
     const titleRow = this.contentEl.createDiv({ cls: "axl-modal-row" });
-    titleRow.createEl("label", { cls: "axl-modal-label", text: "Type" });
+    titleRow.createEl("label", { cls: "axl-modal-label", text: "类型" });
     const title = titleRow.createEl("select", { cls: "axl-modal-select" });
     for (const option of NOTE_TITLE_OPTIONS) {
       title.createEl("option", { text: option.label, attr: { value: option.value } });
@@ -77,10 +77,10 @@ export class CommentModal extends Modal {
 
   private renderContentInput(): HTMLTextAreaElement {
     const contentRow = this.contentEl.createDiv({ cls: "axl-modal-row" });
-    contentRow.createEl("label", { cls: "axl-modal-label", text: "Note" });
+    contentRow.createEl("label", { cls: "axl-modal-label", text: "内容" });
     const input = contentRow.createEl("textarea", {
       cls: "axl-modal-textarea",
-      attr: { rows: "8", placeholder: "Write your thoughts..." },
+      attr: { rows: "8", placeholder: "写下你的想法…" },
     });
     input.value = this.initialContent;
     return input;

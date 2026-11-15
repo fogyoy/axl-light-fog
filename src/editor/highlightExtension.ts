@@ -1,37 +1,90 @@
 /**
  * [INPUT]: 依赖 CodeMirror Decoration API、obsidian editorInfoField、storage/types 的注释文档
- * [OUTPUT]: 对外提供 createHighlightExtension，在编辑器中渲染非侵入式高亮
+ * [OUTPUT]: 对外提供 createHighlightExtension，仅在全文编辑器渲染高亮，按文档订阅刷新并释放监听
  * [POS]: editor 模块的 CM6 高亮投影层，只画视觉效果不修改 doc
  * [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
  */
 
-import { RangeSetBuilder } from "@codemirror/state";
-import { Decoration, type DecorationSet, EditorView, ViewPlugin, type ViewUpdate } from "@codemirror/view";
+import { RangeSetBuilder, StateEffect, type ChangeDesc } from "@codemirror/state";
+import {
+  Decoration,
+  type DecorationSet,
+  EditorView,
+  ViewPlugin,
+  type ViewUpdate,
+} from "@codemirror/view";
 import { editorInfoField } from "obsidian";
 
 import { FileAnnotationDocument } from "../storage/types";
+import { editorCellScope } from "./sourceProjection";
+import { highlightBackground } from "./readingViewHighlight";
+import { visibleMarkdownMarks } from "../storage/visibleMarks";
 
 interface HighlightExtensionOptions {
   getDocument: (filePath: string) => FileAnnotationDocument | null;
+  getSource: (filePath: string) => string | undefined;
   getVersion: () => number;
-  rememberSelection: (filePath: string, startOffset: number, endOffset: number, text: string) => void;
+  onDocumentChange: (listener: (filePath: string) => void) => () => void;
+  trackSource: (
+    filePath: string,
+    before: string,
+    after: string,
+    changes: ChangeDesc,
+  ) => void;
+  rememberSelection: (
+    filePath: string,
+    startOffset: number,
+    endOffset: number,
+    text: string,
+    document: Document,
+    source: string,
+  ) => void;
 }
+
+export const refreshHighlightsEffect = StateEffect.define<null>();
 
 export function createHighlightExtension(options: HighlightExtensionOptions) {
   return ViewPlugin.fromClass(
     class HighlightPlugin {
       decorations: DecorationSet;
       private version = -1;
+      private destroyed = false;
+      private readonly unsubscribe: () => void;
 
       constructor(private readonly view: EditorView) {
         this.decorations = this.buildDecorations();
         this.version = options.getVersion();
         this.captureSelection();
+        this.unsubscribe = options.onDocumentChange((filePath) => {
+          if (filePath === this.filePath())
+            queueMicrotask(() => {
+              if (!this.destroyed) this.view.dispatch({});
+            });
+        });
+      }
+
+      destroy(): void {
+        this.destroyed = true;
+        this.unsubscribe();
       }
 
       update(update: ViewUpdate): void {
+        const filePath = this.filePath();
+        if (filePath && this.isMainEditor() && update.docChanged)
+          options.trackSource(
+            filePath,
+            update.startState.doc.toString(),
+            update.state.doc.toString(),
+            update.changes,
+          );
         const nextVersion = options.getVersion();
-        if (update.docChanged || update.viewportChanged || update.selectionSet || this.version !== nextVersion) {
+        if (
+          update.docChanged ||
+          update.viewportChanged ||
+          update.selectionSet ||
+          update.transactions.some(transaction => transaction.effects.some(effect => effect.is(refreshHighlightsEffect))) ||
+          this.version !== nextVersion
+        ) {
           this.version = nextVersion;
           this.decorations = this.buildDecorations();
         }
@@ -54,28 +107,26 @@ export function createHighlightExtension(options: HighlightExtensionOptions) {
 
         const builder = new RangeSetBuilder<Decoration>();
         const docLength = this.view.state.doc.length;
-        const marks = [
-          ...document.highlights.map((highlight) => ({
-            id: highlight.id,
-            color: highlight.color,
-            anchor: highlight.anchor,
-            orphaned: highlight.orphaned,
-          })),
-          ...document.comments.map((comment) => ({
-            id: comment.id,
-            color: comment.color,
-            anchor: comment.anchor,
-            orphaned: comment.orphaned,
-          })),
-        ].sort((a, b) => a.anchor.startOffset - b.anchor.startOffset);
+        const scope = this.scope();
+        if (!scope) return Decoration.none;
+        const marks = visibleMarkdownMarks(document).sort(
+          (a, b) => a.anchor.startOffset - b.anchor.startOffset,
+        );
 
         for (const mark of marks) {
           if (mark.orphaned) {
             continue;
           }
 
-          const from = Math.max(0, Math.min(mark.anchor.startOffset, docLength));
-          const to = Math.max(from, Math.min(mark.anchor.endOffset, docLength));
+          const from = mark.anchor.startOffset - scope.from;
+          const to = mark.anchor.endOffset - scope.from;
+          if (
+            from < 0 ||
+            to > docLength ||
+            this.view.state.sliceDoc(from, to) !==
+              (mark.anchor.sourceText ?? mark.anchor.selectedText)
+          )
+            continue;
           if (from === to) {
             continue;
           }
@@ -88,6 +139,7 @@ export function createHighlightExtension(options: HighlightExtensionOptions) {
               attributes: {
                 "data-axl-color": mark.color,
                 "data-axl-id": mark.id,
+                "data-axl-file": filePath,
                 style: `background-color: ${highlightBackground(mark.color)} !important;`,
               },
             }),
@@ -110,31 +162,42 @@ export function createHighlightExtension(options: HighlightExtensionOptions) {
 
         options.rememberSelection(
           filePath,
-          selection.from,
-          selection.to,
+          selection.from + (this.scope()?.from ?? 0),
+          selection.to + (this.scope()?.from ?? 0),
           this.view.state.sliceDoc(selection.from, selection.to),
+          this.view.dom.ownerDocument,
+          options.getSource(filePath) ?? this.view.state.doc.toString(),
         );
       }
 
+      private isMainEditor(): boolean {
+        return (
+          this.view.dom
+            .closest(".markdown-source-view")
+            ?.querySelector(".cm-editor") === this.view.dom
+        );
+      }
+      private scope(): { from: number; to: number } | null {
+        if (this.isMainEditor())
+          return { from: 0, to: this.view.state.doc.length };
+        const path = this.view.state.field(editorInfoField, false)?.file?.path;
+        const source = path ? options.getSource(path) : undefined;
+        return source === undefined
+          ? null
+          : editorCellScope(
+              this.view.dom,
+              source,
+              this.view.state.doc.toString(),
+            );
+      }
       private filePath(): string | null {
-        return this.view.state.field(editorInfoField).file?.path ?? null;
+        return this.scope()
+          ? (this.view.state.field(editorInfoField, false)?.file?.path ?? null)
+          : null;
       }
     },
     {
       decorations: (plugin) => plugin.decorations,
     },
   );
-}
-
-function highlightBackground(color: string): string {
-  const colors: Record<string, string> = {
-    yellow: "rgba(245, 197, 24, 0.42)",
-    orange: "rgba(255, 140, 0, 0.36)",
-    pink: "rgba(255, 105, 180, 0.32)",
-    green: "rgba(82, 196, 26, 0.30)",
-    blue: "rgba(22, 119, 255, 0.28)",
-    purple: "rgba(114, 46, 209, 0.30)",
-  };
-
-  return colors[color] ?? colors.yellow;
 }

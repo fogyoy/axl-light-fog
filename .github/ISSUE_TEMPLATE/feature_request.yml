@@ -1,0 +1,29 @@
+name: 功能建议
+description: 提出功能或体验改进建议
+title: "[建议] "
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        请使用公开、合成的示例说明需求。不要包含个人 vault、真实阅读内容或私人旁注。
+  - type: textarea
+    id: problem
+    attributes:
+      label: 想解决的问题
+      description: 描述当前遇到的具体困难。
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 期望行为
+      description: 用合成示例说明你希望如何使用。
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 其他方案（可选）
+    validations:
+      required: false

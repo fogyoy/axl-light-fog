@@ -1,11 +1,11 @@
 # views/
-> L2 | 父级: /Users/epiphanyxiao/Documents/Playground/obsidian-annotation-plugin/src/AGENTS.md
+> L2 | 父级: ../AGENTS.md
 
 成员清单
-annotationPopover.ts: 点击高亮后的弹层视图，在窄屏或阅读模式显示高亮原文与 Markdown 便签。
-commentModal.ts: 便签输入弹窗，收集 note 类型与 Markdown 内容并返回取消/保存结果。
-sidebarView.ts: 右侧 Leaf 总览面板，将 highlight 与关联 note 合并为同一卡片并支持搜索、筛选、排序、跳转、删除与导出。
-stickyNoteView.ts: 兼容型便签卡片组件，保留 Markdown 渲染、折叠、删除、编辑动作。
+annotationPopover.ts: 点击高亮后的弹层视图，显示高亮原文和旁注。
+commentModal.ts: 旁注输入弹窗，收集内容并返回取消或保存结果。
+sidebarView.ts: 右侧总览面板，支持搜索、筛选、排序、跳转、编辑和导出。
+stickyNoteView.ts: 旁注卡片组件，呈现 Markdown 内容及编辑动作。
 
 法则: 视图轻量·操作回调外置·数据来自 store
 
