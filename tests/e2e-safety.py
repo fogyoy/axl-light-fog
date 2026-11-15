@@ -48,6 +48,7 @@ class SafetyTests(unittest.TestCase):
         self.marker()
         def host(args, **kwargs):
             self.assertEqual(args[0], 'obsidian')
+            self.assertEqual(args[1], 'vault=' + self.vault.name)
             return '=> ' + json.dumps(str(self.root / 'different-vault'))
         with self.assertRaises(SystemExit):
             self.execute(host)

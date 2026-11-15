@@ -36,6 +36,21 @@ try {
       throw Error("公开文件包含个人绝对路径：" + name);
     if (secret.test(text)) throw Error("公开文件可能包含凭据：" + name);
   }
+  const identities = run("git", [
+    "log",
+    "--format=%an%x09%ae%x09%cn%x09%ce",
+    "d652c3c92eb3c81d4159b7adb460c88eb61458ff..HEAD",
+  ]);
+  for (const row of identities.split("\n").filter(Boolean)) {
+    const [author, authorEmail, committer, committerEmail] = row.split("\t");
+    if (
+      (author === "fogyoy" &&
+        !authorEmail.endsWith("@users.noreply.github.com")) ||
+      (committer === "fogyoy" &&
+        !committerEmail.endsWith("@users.noreply.github.com"))
+    )
+      throw Error("维护者提交未使用 GitHub 匿名邮箱");
+  }
   console.log("公开文件检查通过");
 } catch (error) {
   fail(error);
