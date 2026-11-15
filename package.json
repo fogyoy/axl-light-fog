@@ -5,7 +5,7 @@
   "description": "基于 Axl Light 的中文维护版，为 Markdown 与 PDF 提供独立旁注。",
   "main": "main.js",
   "scripts": {
-    "test": "node tests/regression.mjs && node tests/anchorCore.mjs && node tests/workflow.mjs && python3 tests/e2e-safety.py && node tests/cli-target.mjs",
+    "test": "node tests/regression.mjs && node tests/anchorCore.mjs && node tests/workflow.mjs && python3 tests/e2e-safety.py && node tests/cli-target.mjs && node tests/merge-safety.mjs",
     "test:obsidian": "python3 tests/obsidian-e2e.py",
     "build": "node esbuild.config.mjs production",
     "dev": "node esbuild.config.mjs",
