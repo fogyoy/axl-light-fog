@@ -1,5 +1,6 @@
 """验证实机测试入口的失败行为，宿主 CLI 在这些故障用例中由边界替身代替。"""
 import contextlib
+import base64
 import io
 import json
 import pathlib
@@ -11,6 +12,10 @@ import unittest
 from unittest.mock import patch
 
 SOURCE = pathlib.Path(__file__).with_name('obsidian-e2e.py')
+
+
+def cli_response(value):
+    return '=> ' + base64.b64encode(json.dumps(value, ensure_ascii=False).encode('utf-8')).decode('ascii')
 
 
 class SafetyTests(unittest.TestCase):
@@ -49,7 +54,8 @@ class SafetyTests(unittest.TestCase):
         def host(args, **kwargs):
             self.assertEqual(args[0], 'obsidian')
             self.assertEqual(args[1], 'vault=' + self.vault.name)
-            return '=> ' + json.dumps(str(self.root / 'different-vault'))
+            self.assertTrue(args[3].isascii(), 'CLI 代码必须通过 ASCII 传输')
+            return cli_response(str(self.root / 'different-vault'))
         with self.assertRaises(SystemExit):
             self.execute(host)
         self.assertEqual(list(self.vault.glob('_AXL*')), [])
@@ -63,12 +69,13 @@ class SafetyTests(unittest.TestCase):
             if args[0] == 'git':
                 return 'f' * 40
             code = next(value[5:] for value in args if value.startswith('code='))
+            self.assertTrue(code.isascii(), '长中文代码不能直接通过 CLI 文本分块传输')
             if 'getBasePath' in code:
-                return '=> ' + json.dumps(str(self.vault))
+                return cli_response(str(self.vault))
             if 'const original=' in code:
-                return '=> {}'
+                return cli_response({})
             if 'p.store.writes' in code:
-                return '=> {"filesRemoved":true}'
+                return cli_response({'filesRemoved': True})
             return 'Error: synthetic host failure'
         with self.assertRaises(RuntimeError):
             self.execute(host)

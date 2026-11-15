@@ -1,5 +1,6 @@
 """通过 Obsidian 官方 CLI 验证已安装插件；仅创建合成笔记，结束后移入回收站。"""
 import json
+import base64
 import argparse
 import hashlib
 import pathlib
@@ -31,11 +32,13 @@ VAULT_NAME = VAULT_PATH.name
 
 
 def evaluate(code):
-    result = subprocess.check_output(['obsidian', 'vault=' + VAULT_NAME, 'eval', 'code=' + code], text=True)
+    # 长中文结果可能跨越 CLI 的文本分块；传入代码和传出 JSON 均使用 ASCII。
+    wrapped = '(async()=>{const value=await eval(' + json.dumps(code, ensure_ascii=True) + ');return Buffer.from(value,"utf8").toString("base64")})()'
+    result = subprocess.check_output(['obsidian', 'vault=' + VAULT_NAME, 'eval', 'code=' + wrapped], text=True)
     if 'Error:' in result or '=> ' not in result:
         raise RuntimeError(result)
     value = result.split('=> ', 1)[1].strip()
-    return json.loads(value)
+    return json.loads(base64.b64decode(value, validate=True).decode('utf-8'))
 
 
 def file_hash(path):
@@ -100,6 +103,9 @@ test_commit = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, te
 try:
     source = '# 标题定位\n\n阅读创建测试，视频模型。视频模型。\n\n中文引号”**强调短语：**后面的正文。\n\n重复段落文字。\n\n重复段落文字。\n\n含公式 $x^2$ 的邻近文字。\n\n脚注附近文字[^n]。\n\n带块ID的文字。 ^audit-block\n\n行内代码 `const x = 1` 与 [链接文字](https://example.invalid)。\n\n- [ ] 任务项目测试\n\n> 引用便签测试\n\n| 字段 | 内容 |\n| --- | --- |\n| 名称 | 视频模型 |\n| 真正标注 | 表格测试 |\n\n[^n]: 注脚说明。\n'
     setup = f"""(async()=>{{{helpers}
+      const nativeWindow=require('@electron/remote').getCurrentWindow();
+      if(nativeWindow.isMinimized())nativeWindow.restore();nativeWindow.show();nativeWindow.focus();
+      await wait(()=>!document.hidden,'请保持测试窗口可见并解锁屏幕');
       const original=app.workspace.getMostRecentLeaf();
       assert(plugin() && plugin().commentModals.size===0,'请先启用插件并完成尚未关闭的便签编辑');
       assert(!window.__axlAudit,'上次验收尚未清理');
