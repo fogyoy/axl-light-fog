@@ -1,9 +1,25 @@
+# Dependencies and generated bundles
 node_modules/
 main.js
 dist/
+build/
 *.map
-.DS_Store
-*.bak
+
+# Local environment and secrets
+.local/
+.env
+.env.*
+!.env.example
+
+# Obsidian vault data and plugin state
 .obsidian/
 .obsidian-annotations/
+data.json
+
+# Temporary and OS files
+.DS_Store
+*.bak
 npm-debug.log*
+__pycache__/
+*.pyc
+tests/runtime.cjs

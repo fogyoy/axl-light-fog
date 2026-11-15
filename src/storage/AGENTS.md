@@ -1,10 +1,12 @@
 # storage/
-> L2 | 父级: /Users/epiphanyxiao/Documents/Playground/obsidian-annotation-plugin/src/AGENTS.md
+> L2 | 父级: ../AGENTS.md
 
 成员清单
-types.ts: sidecar JSON、注释、便签、代码选区标记、设置、索引的类型真相源。
-annotationStore.ts: .obsidian-annotations 持久化入口，负责短 sidecar 文件名、index、导出与旧路径迁移。
+types.ts: 旁注 JSON、标注、锚点、设置与索引的类型定义。
+annotationStore.ts: 旁注持久化、校验、索引、导出和路径迁移。
+validation.ts: 旁注持久化数据的结构校验。
+visibleMarks.ts: 从存储状态计算可见 Markdown 标注。
 
-法则: Markdown 只读·sidecar 持久·缓存加速·索引导航
+法则: Markdown 只读·旁注持久·写入失败明确处理·索引服务导航
 
 [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md

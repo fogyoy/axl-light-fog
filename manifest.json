@@ -1,10 +1,10 @@
 {
-  "id": "axl-light",
-  "name": "Axl Light",
-  "version": "0.3.1",
-  "minAppVersion": "1.0.0",
-  "description": "为 Markdown 和 PDF 添加高亮与便签；注释单独保存，不修改原文件。",
-  "author": "Epiphany Xiao",
-  "authorUrl": "https://github.com/little-pond/axl-light",
-  "isDesktopOnly": false
+  "id": "axl-light-fog",
+  "name": "Axl Light Fog",
+  "version": "0.4.0",
+  "minAppVersion": "1.15.1",
+  "description": "Markdown 与 PDF 旁注的中文维护版；高亮和便签独立保存，不修改原文件。",
+  "author": "Epiphany Xiao, fogyoy",
+  "authorUrl": "https://github.com/fogyoy/axl-light-fog",
+  "isDesktopOnly": true
 }

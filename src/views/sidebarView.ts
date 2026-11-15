@@ -29,7 +29,7 @@ import {
   PdfHighlightAnnotation,
 } from "../storage/types";
 
-export const ANNOTATION_SIDEBAR_VIEW = "axl-light-sidebar";
+export const ANNOTATION_SIDEBAR_VIEW = "axl-light-fog-sidebar";
 
 type AnnotationKind = "highlight" | "note";
 type AnnotationMode = "md" | "pdf";
@@ -117,11 +117,11 @@ export class AnnotationSidebarView extends ItemView {
   }
 
   getDisplayText(): string {
-    return "Axl Light";
+    return "Axl Light Fog";
   }
 
   getIcon(): string {
-    return "axl-light-icon";
+    return "axl-light-fog-icon";
   }
 
   async onOpen(): Promise<void> {
@@ -391,13 +391,13 @@ export class AnnotationSidebarView extends ItemView {
 
   private renderHeader(container: Element): void {
     const header = container.createDiv({ cls: "axl-ov-head" });
-    header.createSpan({ cls: "axl-ov-title", text: "Axl Light" });
+    header.createSpan({ cls: "axl-ov-title", text: "Axl Light Fog" });
     const close = header.createEl("button", {
       cls: "axl-icon-btn axl-ov-close",
       attr: {
         type: "button",
         title: "关闭面板",
-        "aria-label": "关闭 Axl Light 面板",
+        "aria-label": "关闭 Axl Light Fog 面板",
       },
     });
     setIcon(close, "x");

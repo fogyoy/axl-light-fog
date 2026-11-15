@@ -101,7 +101,7 @@ export default class OverlayAnnotationsPlugin extends Plugin {
   private readonly renameMigrationTimers = new Map<string, number>();
 
   async onload(): Promise<void> {
-    addIcon("axl-light-icon", AXL_LIGHT_ICON);
+    addIcon("axl-light-fog-icon", AXL_LIGHT_ICON);
     await this.loadSettings();
     this.store = new AnnotationStore(this.app);
     await this.store.initialize();
@@ -330,7 +330,7 @@ export default class OverlayAnnotationsPlugin extends Plugin {
   }
 
   private registerRibbonIcon(): void {
-    const icon = this.addRibbonIcon("highlighter", "打开 Axl Light", () => {
+    const icon = this.addRibbonIcon("highlighter", "打开 Axl Light Fog", () => {
       void this.activateSidebar();
     });
     icon.addClass("axl-ribbon-icon");
@@ -426,7 +426,7 @@ export default class OverlayAnnotationsPlugin extends Plugin {
         this.sourceSaves.set(
           file.path,
           next.catch((error) => {
-            console.error("Axl Light source update failed", error);
+            console.error("Axl Light Fog source update failed", error);
             new Notice("标注位置更新未保存，请稍后重试。");
           }),
         );

@@ -1,20 +1,60 @@
 """通过 Obsidian 官方 CLI 验证已安装插件；仅创建合成笔记，结束后移入回收站。"""
 import json
+import argparse
+import hashlib
 import pathlib
 import subprocess
-import sys
 import uuid
+from datetime import datetime, timezone
 
 PREFIX = '_AXL_Audit_' + uuid.uuid4().hex[:8]
-PLUGIN = 'axl-light-zh'
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+MANIFEST = json.loads((ROOT / 'manifest.json').read_text(encoding='utf-8'))
+PLUGIN = MANIFEST['id']
+VERSION = MANIFEST['version']
+EVIDENCE = ROOT / '.local/evidence/obsidian.json'
+
+parser = argparse.ArgumentParser()
+parser.add_argument('--vault-path', required=True, type=pathlib.Path)
+args = parser.parse_args()
+VAULT_PATH = args.vault_path.expanduser().resolve(strict=True)
+MARKER = VAULT_PATH / '.axl-test-vault.json'
+if not VAULT_PATH.is_dir():
+    raise SystemExit('--vault-path 必须是目录')
+try:
+    marker = json.loads(MARKER.read_text(encoding='utf-8'))
+except (OSError, json.JSONDecodeError) as error:
+    raise SystemExit('测试库标记缺失或无效') from error
+if marker.get('purpose') != 'axl-light-fog-e2e':
+    raise SystemExit('测试库标记 purpose 不匹配')
+VAULT_NAME = VAULT_PATH.name
 
 
 def evaluate(code):
-    result = subprocess.check_output(['obsidian', 'eval', 'code=' + code], text=True)
+    result = subprocess.check_output(['obsidian', 'eval', 'vault=' + VAULT_NAME, 'code=' + code], text=True)
     if 'Error:' in result or '=> ' not in result:
         raise RuntimeError(result)
     value = result.split('=> ', 1)[1].strip()
     return json.loads(value)
+
+
+def file_hash(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+# 清除旧凭证，任何失败都不能留下之前的 passed 结果。
+EVIDENCE.unlink(missing_ok=True)
+actual_path = evaluate('JSON.stringify(app.vault.adapter.getBasePath())')
+if pathlib.Path(actual_path).expanduser().resolve() != VAULT_PATH:
+    raise SystemExit('CLI 指向的 vault 路径与 --vault-path 不一致')
+
+artifact_paths = {name: ROOT / name for name in ('main.js', 'manifest.json', 'styles.css', 'LICENSE')}
+installed = VAULT_PATH / '.obsidian/plugins' / PLUGIN
+artifact_hashes = {name: file_hash(path) for name, path in artifact_paths.items()}
+for name, expected in artifact_hashes.items():
+    candidate = installed / name
+    if not candidate.is_file() or file_hash(candidate) != expected:
+        raise SystemExit('已安装插件文件与仓库构建产物不一致：' + name)
 
 
 def pdf_bytes():
@@ -38,7 +78,7 @@ def pdf_bytes():
 helpers = """
 const assert = (condition,message) => {if(!condition)throw Error(message);};
 const wait = async (predicate,message) => {for(let i=0;i<160;i++){if(predicate())return;await new Promise(r=>setTimeout(r,25));}throw Error(message);};
-const plugin = () => app.plugins.plugins['axl-light-zh'];
+const plugin = () => app.plugins.plugins[__PLUGIN_ID__];
 const select = (root,text,occurrence=0) => {
   const doc=root.ownerDocument, walker=doc.createTreeWalker(root,4), nodes=[];let node;
   while(node=walker.nextNode())if(!node.parentElement.closest('button,svg,.mod-header,.mod-footer,.callout-title'))nodes.push(node);
@@ -52,7 +92,11 @@ const select = (root,text,occurrence=0) => {
   return selection;
 };
 """
+helpers = helpers.replace('__PLUGIN_ID__', json.dumps(PLUGIN))
+SIDEBAR = PLUGIN + '-sidebar'
 result = {}
+test_passed = False
+test_commit = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip()
 try:
     source = '# 标题定位\n\n阅读创建测试，视频模型。视频模型。\n\n中文引号”**强调短语：**后面的正文。\n\n重复段落文字。\n\n重复段落文字。\n\n含公式 $x^2$ 的邻近文字。\n\n脚注附近文字[^n]。\n\n带块ID的文字。 ^audit-block\n\n行内代码 `const x = 1` 与 [链接文字](https://example.invalid)。\n\n- [ ] 任务项目测试\n\n> 引用便签测试\n\n| 字段 | 内容 |\n| --- | --- |\n| 名称 | 视频模型 |\n| 真正标注 | 表格测试 |\n\n[^n]: 注脚说明。\n'
     setup = f"""(async()=>{{{helpers}
@@ -118,7 +162,7 @@ try:
       const scroll=view.previewMode.getScroll();await app.vault.modify(s.files[1],'独立文档写入验收：已保存');await new Promise(r=>setTimeout(r,100));assert(view.previewMode.getScroll()===scroll,'其他文档保存干扰阅读位置');
       s.results.push('其他文档保存不改变阅读位置');
       s.ids=(await plugin().store.getDocument(file)).highlights.map(m=>m.id);
-      await plugin().activateSidebar();const sidebar=app.workspace.getLeavesOfType('axl-light-sidebar')[0].view;await sidebar.render();
+      await plugin().activateSidebar();const sidebar=app.workspace.getLeavesOfType('__SIDEBAR__')[0].view;await sidebar.render();
       assert(sidebar.containerEl.querySelectorAll('.axl-ov-card').length>0,'侧栏缺少标注卡片');
       const selector=sidebar.containerEl.querySelector('select.axl-filter-select');selector.value='blue';selector.dispatchEvent(new Event('change'));await new Promise(r=>setTimeout(r,50));
       assert(sidebar.containerEl.querySelectorAll('.axl-ov-card').length===1,'侧栏颜色筛选错误');
@@ -132,6 +176,7 @@ try:
       s.results.push('侧栏草稿保留与 Markdown 导出');
       return JSON.stringify({{checks:s.results,highlightCount:s.ids.length}});
     }})()"""
+    markdown = markdown.replace('__SIDEBAR__', SIDEBAR)
     result['markdown'] = evaluate(markdown)
     result['pdfOpen'] = evaluate("""(async()=>{const s=window.__axlAudit;await s.leaf.openFile(s.files[2]);await app.workspace.revealLeaf(s.leaf);return JSON.stringify({opened:true});})()""")
     pdf = f"""(async()=>{{{helpers}
@@ -175,7 +220,7 @@ try:
       leaf.detach();s.extraLeaves=[];await app.workspace.revealLeaf(s.leaf);
       return JSON.stringify({{markdown:true,secondOccurrence:true,pdf:true,closedCleanly:true}});
     }})()""")
-    subprocess.check_output(['obsidian', 'plugin:reload', 'id='+PLUGIN], text=True)
+    subprocess.check_output(['obsidian', 'plugin:reload', 'vault='+VAULT_NAME, 'id='+PLUGIN], text=True)
     result['reload'] = evaluate(f"""(async()=>{{{helpers}
       const s=window.__axlAudit;await s.leaf.openFile(s.files[0]);await s.leaf.setViewState({{type:'markdown',state:{{file:s.files[0].path,mode:'preview'}}}});
       const data=await plugin().store.getDocument(s.files[0]);assert(s.ids.every(id=>data.highlights.some(m=>m.id===id)),'重载后记录丢失');
@@ -183,13 +228,18 @@ try:
       assert(document.querySelectorAll('.axl-selection-toolbar').length===1,'重载重复注册工具条');
       return JSON.stringify({{persisted:data.highlights.length,comments:data.comments.length,toolbarCount:document.querySelectorAll('.axl-selection-toolbar').length}});
     }})()""")
+    test_passed = True
 except Exception as error:
-    result['failure'] = evaluate("""(()=>{const s=window.__axlAudit;if(!s)return JSON.stringify({});const p=app.plugins.plugins['axl-light-zh'];return JSON.stringify({checks:s.results,source:s.leaf?.view.getViewData?.(),html:s.leaf?.view.containerEl.outerHTML,marks:p.store.getCachedDocument(s.files[0]?.path)?.highlights});})()""")
+    result['failure'] = {'message': '实机验收失败'}
+    try:
+        result['failure']['diagnostics'] = evaluate(f"""(()=>{{const s=window.__axlAudit;return JSON.stringify({{checks:s?.results??[]}});}})()""")
+    except Exception:
+        result['failure']['diagnosticsUnavailable'] = True
     raise
 finally:
     result['cleanup'] = evaluate(f"""(async()=>{{
       const s=window.__axlAudit;if(!s)return JSON.stringify({{nothingCreated:true}});
-      const p=app.plugins.plugins['axl-light-zh'];await p.store.writes;
+      const p=app.plugins.plugins[{json.dumps(PLUGIN)}];await p.store.writes;
       const recovery='.trash/'+s.prefix;if(!(await app.vault.adapter.exists(recovery)))await app.vault.adapter.mkdir(recovery);
       for(const leaf of s.extraLeaves??[])leaf.detach();
       for(const modal of p.commentModals)modal.close();
@@ -204,4 +254,16 @@ finally:
       const saved={{recovery,filesRemoved:s.files.every(file=>!app.vault.getAbstractFileByPath(file.path))}};delete window.__axlAudit;
       return JSON.stringify(saved);
     }})()""")
-    print(json.dumps(result, ensure_ascii=False, indent=2))
+    if test_passed and result.get('cleanup', {}).get('filesRemoved') is True and not result.get('failure'):
+        commit = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip()
+        if commit != test_commit or any(file_hash(path) != artifact_hashes[name] for name, path in artifact_paths.items()):
+            raise RuntimeError('测试期间提交或安装产物发生变化，拒绝生成通过凭证')
+        checks = {key: value for key, value in result.items() if key not in ('setup', 'cleanup')}
+        evidence = {
+            'status': 'passed', 'commit': commit, 'pluginId': PLUGIN, 'version': VERSION,
+            'artifacts': artifact_hashes, 'checks': checks,
+            'timestampUTC': datetime.now(timezone.utc).isoformat(),
+        }
+        EVIDENCE.parent.mkdir(parents=True, exist_ok=True)
+        EVIDENCE.write_text(json.dumps(evidence, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+    print(json.dumps({key: value for key, value in result.items() if key not in ('setup', 'failure')}, ensure_ascii=False, indent=2))

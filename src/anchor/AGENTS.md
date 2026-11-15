@@ -1,10 +1,9 @@
 # anchor/
-> L2 | 父级: /Users/epiphanyxiao/Documents/Playground/obsidian-annotation-plugin/src/AGENTS.md
+> L2 | 父级: ../AGENTS.md
 
 成员清单
-textAnchor.ts: 文本锚点核心，生成 offset+quote+context 并恢复轻微漂移后的定位。
-fuzzyMatch.ts: 模糊匹配工具，使用近邻窗口与编辑距离恢复失效锚点。
+textAnchor.ts: 文本锚点生成、规范化、源文档映射与定位计算。
 
-法则: offset 优先·quote 兜底·context 判别·失败显式 orphaned
+法则: 源文档映射·quote/context 辅助判定·定位失败显式处理
 
 [PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md

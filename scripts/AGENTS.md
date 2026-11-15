@@ -1,11 +1,12 @@
 # scripts/
-> L2 | 父级: /Users/epiphanyxiao/Documents/Playground/obsidian-annotation-plugin/AGENTS.md
 
-成员清单
-install.sh: 一条命令安装器，从 GitHub release 下载 main.js、manifest.json、styles.css 到指定 Obsidian vault。
-install.ps1: Windows PowerShell 安装器，提示 vault 路径、下载校验 release 产物并复制插件目录到剪贴板。
-install.cmd: Windows cmd 双击包装器，复用本地或远程 install.ps1，屏蔽执行策略细节。
+维护入口统一从插件清单读取 ID 和版本。
 
-法则: 安装脚本只搬运 release 产物·不修改 vault 内容·失败信息必须可执行
+- lib.mjs 提供 CLI 定向、路径核对、校验值、私有备份和旁注快照。
+- package.mjs 构建可重复的 ZIP 和 SHA256SUMS。
+- check-public.mjs 检查公开文件，拒绝笔记、设置、凭据和个人绝对路径。
+- test-vault.mjs 准备独立验收库，避免在日常笔记库运行测试。
+- install.mjs、local-install.mjs、rollback.mjs 负责显式指定笔记库的安装、身份迁移和回退。安装日常笔记库前必须使用已验收产物并保留备份，不能覆盖旁注。
+- release.mjs 要求稳定 main 的 CI、同提交实机验收与一致的产物，禁止覆盖不同内容的同名版本。
 
-[PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
+改动脚本后更新相关测试和维护说明。真实功能测试使用专用测试库，正式安装通过明确路径和备份独立执行。

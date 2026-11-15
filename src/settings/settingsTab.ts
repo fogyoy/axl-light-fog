@@ -18,7 +18,7 @@ export class AnnotationSettingsTab extends PluginSettingTab {
   display(): void {
     const { containerEl } = this;
     containerEl.empty();
-    containerEl.createEl("h2", { text: "Axl Light" });
+    containerEl.createEl("h2", { text: "Axl Light Fog" });
 
     new Setting(containerEl)
       .setName("默认高亮颜色")
