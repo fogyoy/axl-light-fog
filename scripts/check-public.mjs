@@ -38,6 +38,7 @@ try {
   }
   const identities = run("git", [
     "log",
+    "--no-merges",
     "--format=%an%x09%ae%x09%cn%x09%ce",
     "d652c3c92eb3c81d4159b7adb460c88eb61458ff..HEAD",
   ]);
